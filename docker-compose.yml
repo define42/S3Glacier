@@ -1,0 +1,11 @@
+version: "3.2"
+services:
+ glacier:
+    build: .
+    network_mode: host
+    volumes:
+    - /files/:/files/
+    environment:
+      DISK_USAGE_ALLOWED: 99
+      READ_TOKEN: aaaa
+      WRITE_TOKEN: bbbb

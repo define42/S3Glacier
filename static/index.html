@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+  <title>S3 Glacier</title>
+  <link href="static/bootstrap.css" rel="stylesheet">
+</head>
+
+<body>
+
+  <nav class="navbar navbar-expand-lg navbar-light bg-light">
+    <a class="navbar-brand" href="#" style="color:red;"><b>S3 Glacier</b></a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNavAltMarkup"
+      aria-controls="navbarNavAltMarkup" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarNavAltMarkup">
+      <div class="navbar-nav">
+        <a class="nav-item nav-link active" href="./files/" target="test">ViewFiles</a>
+        <a class="nav-item nav-link active" href="./uuidv1" target="test">ExampleTimeUUID V1</a>
+        <a class="nav-item nav-link active" href="./uuid" target="test">ExampleTimeUUID V4</a>
+        <a class="nav-item nav-link active" href="./metrics" target="test">Prometheus</a>
+      </div>
+    </div>
+  </nav>
+
+  <br>
+  <br>
+  <div class="shadow-none p-3 mb-5 bg-light rounded">
+    <h3>Upload with uuid filename</h3>
+    <div>
+      <form enctype="multipart/form-data" action="./upload" method="post">
+        <div class="form-group">
+          <input type="text" name="token" placeholder=token />
+          <input type="file" name="file" multiple/>
+          <input type="submit" value="upload" class="btn btn-primary" />
+      </form>
+    </div>
+  </div>
+  </div>
+
+  <div class="shadow-none p-3 mb-5 bg-light rounded">
+    <h3>Upload without uuid filename(Test only)</h3>
+    <form enctype="multipart/form-data" action="./upload?newuuid=true" method="post">
+      <div class="form-group">
+          <input type="text" name="token" placeholder=token />
+        <input type="file" name="file" multiple/>
+        <input type="submit" value="upload" class="btn btn-primary" />
+      </div>
+  </div>
+  </div>
+  </form>
+
+  <div class="shadow-none p-3 mb-5 bg-light rounded">
+    <h3>Download file url</h3>
+    <form action="./redirect" target="_blank" method="get">
+      <div class="form-group">
+        <input type="text" name="file" size=40 />
+        <input type="submit" value="Download" class="btn btn-primary" />
+    </form>
+    <xmp>
+      /get/{uuid}
+    </xmp>
+  </div>
+
+
+  <h3>Supported uploads</h3>
+  <div class="shadow-none p-3 mb-5 bg-light rounded">
+    <b>Multipart</b>
+    Filename must contain a time-uuid
+    <xmp>
+      <form action="/upload" method="post">
+        <input type="file" name="file" />
+        <input type="submit" value="upload" />
+      </form>
+    </xmp>
+  </div>
+
+  <div class="shadow-none p-3 mb-5 bg-light rounded">
+    <b>RawUpload</b>
+    {id} must contain time-uuid
+    <xmp>
+      <form action="/rawupload/{id}" method="post">
+        <input type="file" />
+        <input type="submit" value="upload" />
+      </form>
+    </xmp>
+  </div>
+
+</body>
+
+</html>
