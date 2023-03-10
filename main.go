@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/caddyserver/certmagic"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -158,9 +157,7 @@ func main() {
 	go prometheus.SystemStat()
 
 	if config.Settings.Has(config.SERVER_DOMAIN) && config.Settings.Has(config.ACME_SERVER) {
-		certmagic.DefaultACME.Agreed = true
-		certmagic.DefaultACME.CA = config.Settings.Get(config.ACME_SERVER)
-		log.Fatal(certmagic.HTTPS([]string{config.Settings.Get(config.SERVER_DOMAIN)}, r))
+		log.Fatal(HTTPSACME([]string{config.Settings.Get(config.SERVER_DOMAIN)}, r, config.Settings.Get(config.ACME_SERVER)))
 	} else {
 		http.ListenAndServe(":"+config.Settings.Get(config.SERVER_PORT), r)
 	}
