@@ -1,7 +1,7 @@
 # S3 Glacier Archive Server 
-Glacier is essentially a storage database with high write performance and cohesive delete performance.  
+S3 Glacier is essentially a storage database with high write performance and cohesive delete performance.  
   
-It's design is simple (~1000 line of code) and data is simply saved into Tar archives, identified by timestamp in the UUID. 
+It's design is simple (~2000 line of code) and data is simply saved into Tar archives, identified by timestamp in the UUID. 
 
 - UUID version 1(RFC 4122) include timestamp in the UUID and is supported without any changes. 
 - UUID version 4 is supported by adding a human readable timestamp(`YYYYMMDD-HHMM`) in the first two sections. 
