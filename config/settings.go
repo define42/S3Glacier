@@ -42,8 +42,8 @@ const (
 	SERVER_PORT = "SERVER_PORT"
 	READ_TOKEN = "READ_TOKEN"
 	WRITE_TOKEN = "WRITE_TOKEN"
-	S3_READ_TOKEN = "S3_READ_TOKEN"
-	S3_WRITE_TOKEN = "S3_WRITE_TOKEN"
+	S3_READ_ONLY_USERS = "S3_READ_ONLY_USERS"
+	S3_READ_WRITE_USERS = "S3_READ_WRITE_USERS"
 )
 
 func (s *SettingsType) Init() {
@@ -55,8 +55,8 @@ func (s *SettingsType) Init() {
 	s.Set(SERVER_PORT, "server tcp port","8000")
 	s.Set(READ_TOKEN, "Read TOKEN [;]","")
 	s.Set(WRITE_TOKEN, "Write TOKEN [;]","")
-	s.Set(S3_READ_TOKEN, "S3 Read TOKEN [user=key;]","")
-	s.Set(S3_WRITE_TOKEN, "S3 Write TOKEN [user=key;]","")
+	s.Set(S3_READ_ONLY_USERS, "S3 Read only users [user=key;]","")
+	s.Set(S3_READ_WRITE_USERS, "S3 Read and Write users [user=key;]","")
 
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetAutoWrapText(false)
