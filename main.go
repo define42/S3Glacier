@@ -138,15 +138,15 @@ func InitServer() *mux.Router {
 
 	r.HandleFunc("/uuid", gui.Uuidhello)
 	r.HandleFunc("/uuidv1", gui.Uuidv1hello)
-	r.HandleFunc("/data/", s3.S3Bucket)
+	r.Handle("/data/", s3.S3Security(s3.S3Bucket))
 	r.HandleFunc("/upload", uploadFile)
 	r.HandleFunc("/rawupload/{id}", rawUpload)
 	r.HandleFunc("/rawupload/{token}/{id}", rawUpload)
 	r.HandleFunc("/get/{id}", shared.GetFile)
 	r.HandleFunc("/get/{token}/{id}", shared.GetFile)
 	r.HandleFunc("/redirect", gui.Redirect)
-	r.HandleFunc("/data/{id}", s3.S3Put)
-	r.HandleFunc("/{token}/{id}", s3.S3Put)
+	r.Handle("/data/{id}", s3.S3Security(s3.S3Handler))
+	r.Handle("/{token}/{id}", s3.S3Security(s3.S3Handler))
 	r.Handle("/metrics", promhttp.Handler())
 	return r
 }

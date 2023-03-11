@@ -11,7 +11,11 @@ import (
 	"io/ioutil"
 	"net/http"
 	"time"
-
+	        "crypto/hmac"
+        "crypto/sha1"
+        "encoding/base64"
+	"net/http/httputil"
+	"strings"
 	"github.com/gorilla/mux"
 )
 
@@ -31,6 +35,8 @@ func xmlEncoder(w http.ResponseWriter) *xml.Encoder {
 }
 
 func S3Bucket(w http.ResponseWriter, r *http.Request) {
+	dump, _ := httputil.DumpRequest(r, true)
+	fmt.Println(string(dump))
 	result := GetBucketLocation{
 		Xmlns:              "http://s3.amazonaws.com/doc/2006-03-01/",
 		LocationConstraint: "",
@@ -43,7 +49,55 @@ func formatHeaderTime(t time.Time) string {
 	return tc.Format("Mon, 02 Jan 2006 15:04:05") + " GMT"
 }
 
-func S3Put(w http.ResponseWriter, r *http.Request) {
+const (
+	Authorization = "Authorization"
+)
+
+type S3SecurityHandle func(w http.ResponseWriter, r *http.Request)
+
+func S3Security(next S3SecurityHandle) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//        dump, _ := httputil.DumpRequest(r, true)
+//        fmt.Println(string(dump))
+        stringToSign := StringToSignV2(*r, false)
+
+        v2Auth := r.Header.Get(Authorization)
+        if v2Auth == "" {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+        }
+        if !strings.HasPrefix(v2Auth, signV2Algorithm) {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+        }
+
+        authFields := strings.Split(v2Auth, " ")
+        if len(authFields) != 2 {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+        }
+        keySignFields := strings.Split(strings.TrimSpace(authFields[1]), ":")
+        if len(keySignFields) != 2 {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+        }
+
+        secretAccessKey := "sssssssssssssssssssssssssssssssssssssssssss"
+        hm := hmac.New(sha1.New, []byte(secretAccessKey))
+        hm.Write([]byte(stringToSign))
+
+        // Calculate signature.
+        signature := base64.StdEncoding.EncodeToString(hm.Sum(nil))
+        fmt.Println("signature:", signature, "keySignFields[0]:", keySignFields[0], " keySignFields[1]:", keySignFields[1])
+        if signature == keySignFields[1] {
+		next(w, r)
+        }else{
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	})
+}
+
+func S3Handler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id, ok := vars["id"]
 	if !ok {
