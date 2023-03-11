@@ -53,47 +53,84 @@ const (
 	Authorization = "Authorization"
 )
 
+
+type S3User struct {
+        SecretAccessKey string
+}
+
+type S3Users struct {
+        m map[string]S3User
+}
+
+
+var s3UsersList = &S3Users{m: make(map[string]S3User)}
+
+func AddS3User(accessKeyID string, secretAccessKey string) {
+	s3UsersList.m[accessKeyID] = S3User{SecretAccessKey: secretAccessKey}
+	fmt.Println("accessKeyID:", accessKeyID, " secretAccessKey:", secretAccessKey)
+}
+
+func AddS3UserWrite(s3writetoken string) {
+         users := strings.Split(s3writetoken, ";")
+	for _, user := range users {
+		keyPass := strings.Split(strings.TrimSpace(user), "=")
+		if len(keyPass) == 2 {
+			AddS3User(keyPass[0], keyPass[1])
+		}
+	}
+}
+
+
 type S3SecurityHandle func(w http.ResponseWriter, r *http.Request)
 
 func S3Security(next S3SecurityHandle) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 //        dump, _ := httputil.DumpRequest(r, true)
 //        fmt.Println(string(dump))
+
         stringToSign := StringToSignV2(*r, false)
 
         v2Auth := r.Header.Get(Authorization)
         if v2Auth == "" {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
 		return
         }
         if !strings.HasPrefix(v2Auth, signV2Algorithm) {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotAcceptable)
 		return
         }
 
         authFields := strings.Split(v2Auth, " ")
         if len(authFields) != 2 {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotAcceptable)
 		return
         }
         keySignFields := strings.Split(strings.TrimSpace(authFields[1]), ":")
         if len(keySignFields) != 2 {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusNotAcceptable)
 		return
         }
-
-        secretAccessKey := "sssssssssssssssssssssssssssssssssssssssssss"
-        hm := hmac.New(sha1.New, []byte(secretAccessKey))
-        hm.Write([]byte(stringToSign))
-
-        // Calculate signature.
-        signature := base64.StdEncoding.EncodeToString(hm.Sum(nil))
-        fmt.Println("signature:", signature, "keySignFields[0]:", keySignFields[0], " keySignFields[1]:", keySignFields[1])
-        if signature == keySignFields[1] {
-		next(w, r)
-        }else{
-		w.WriteHeader(http.StatusInternalServerError)
+	if len(s3UsersList.m) == 0 {
+		w.WriteHeader(http.StatusNotAcceptable)
+		return
 	}
+//	s3UsersList
+//	keySignFields[0]
+	if val, ok := s3UsersList.m[keySignFields[0]]; ok {
+        	secretAccessKey := val.SecretAccessKey
+        	hm := hmac.New(sha1.New, []byte(secretAccessKey))
+        	hm.Write([]byte(stringToSign))
+	
+	        // Calculate signature.
+	        signature := base64.StdEncoding.EncodeToString(hm.Sum(nil))
+	        fmt.Println("signature:", signature, "keySignFields[0]:", keySignFields[0], " keySignFields[1]:", keySignFields[1])
+	        if signature == keySignFields[1] {
+			next(w, r)
+			return
+	        }
+	}
+	w.WriteHeader(http.StatusUnauthorized)
+
 	})
 }
 

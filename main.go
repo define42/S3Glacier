@@ -111,6 +111,10 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 
 func InitServer() *mux.Router {
 	config.Settings.Init()
+
+	s3WriteToken := config.Settings.Get(config.S3_WRITE_TOKEN)
+	s3.AddS3UserWrite(s3WriteToken)
+
 	pcapDetector := func(raw []byte, limit uint32) bool {
 		return bytes.HasPrefix(raw, []byte("\xd4\xc3\xb2\xa1"))
 	}

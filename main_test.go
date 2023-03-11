@@ -16,9 +16,10 @@ import (
 )
 
 func TestS3(t *testing.T) {
+	accessKeyID := "s3usernameABC"
+	secretAccessKey := "s3passwordABC"
+	t.Setenv("S3_WRITE_TOKEN", accessKeyID+"="+secretAccessKey)
 	endpoint := "localhost"
-	accessKeyID := "aaaaaaaaaaaaaaaaaaaa"
-	secretAccessKey := "sssssssssssssssssssssssssssssssssssssssssss"
 	test_uuid := shared.GenerateTimeUUID()
 	useSSL := false
 
