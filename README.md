@@ -21,6 +21,7 @@ Pros
 - S3 support (Version 2) with one bucket "data"
 - Build in prometheus support.
 - Build in ACME support.
+- Support object/blob compression.
 - Support UUID version 4 with human readable timestamp(`YYYYMMDD-HHMM`) in the first two sections.
 - Support UUID version 1 according to RFC 4122
 - Built-in web-GUI with support for uploading/downloading and browsing files on disk
