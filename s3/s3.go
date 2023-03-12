@@ -150,11 +150,19 @@ func S3Handler(w http.ResponseWriter, r *http.Request, user S3User) {
 	switch r.Method {
 	case "GET":
 		{
+			if !user.Read {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			w.Header().Set("Last-Modified", formatHeaderTime(shared.GetFileTime(id)))
 			shared.GetFile(w, r)
 		}
 	case "PUT":
 		{
+			if !user.Write {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			prometheus.RawUploadProcessed.Inc()
 			fileBytes, err := ioutil.ReadAll(r.Body)
 			if err != nil {
