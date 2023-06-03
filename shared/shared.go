@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"glacier/config"
@@ -21,6 +22,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/linkedin/goavro"
 )
 
 var ctx = context.Background()
@@ -104,6 +106,46 @@ func GetFileTime(uuidString string) time.Time {
 	return timestamp
 }
 
+func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
+
+	// Create a new OCF Reader
+	avroReader, err := goavro.NewOCFReader(reader)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	// Iterate through all Avro data records
+	w.Write([]byte("["))
+	for avroReader.Scan() {
+		// Get the next Avro data record
+		nativeData, err := avroReader.Read()
+		if err != nil {
+			return err
+		}
+
+		// Convert native data to JSON
+		jsonData, err := json.Marshal(nativeData)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(jsonData)
+		if err != nil {
+			return err
+		}
+		if avroReader.RemainingBlockItems() > 0 {
+			_, err = w.Write([]byte(","))
+			if err != nil {
+				return err
+			}
+		}
+
+	}
+	w.Write([]byte("]"))
+
+	return nil
+}
+
 func GetFile(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	vars := mux.Vars(r)
@@ -116,6 +158,12 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		fmt.Println("token is missing in parameters")
 	}
+	query := r.URL.Query()
+
+	// Access individual query parameters
+	parse := query.Get("parse")
+	fmt.Println(parse)
+
 	fmt.Println(token)
 	if config.Settings.Has(config.READ_TOKEN) && token != config.Settings.Get(config.READ_TOKEN) {
 		w.WriteHeader(http.StatusForbidden)
@@ -177,6 +225,16 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				defer gzf.Close()
+
+				if parse == "avro" {
+					err = outputAvro2Json(gzf, w)
+					if err != nil {
+						w.WriteHeader(http.StatusInternalServerError)
+						fmt.Fprintln(w, "avro to json error:", err)
+					}
+					return
+				}
+
 				_, err = io.Copy(w, gzf)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
@@ -185,6 +243,14 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			} else {
+				if parse == "avro" {
+					err = outputAvro2Json(tr, w)
+					if err != nil {
+						w.WriteHeader(http.StatusInternalServerError)
+						fmt.Fprintln(w, "avro to json error:", err)
+					}
+					return
+				}
 				if _, err := io.Copy(w, tr); err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
 					fmt.Fprintln(w, "open tar file failed", err)

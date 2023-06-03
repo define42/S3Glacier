@@ -56,6 +56,7 @@ func rawUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("uploadFile")
 	defer r.Body.Close()
 	r.ParseMultipartForm(10 << 30)
 	tokenList := r.MultipartForm.Value["token"]
@@ -126,6 +127,11 @@ func InitServer() *mux.Router {
 		return bytes.HasPrefix(raw, []byte("\x0a\x0d\x0d\x0a"))
 	}
 	mimetype.Extend(pcapngDetector, "application/x-pcapng", ".pcapng")
+
+	avroDetector := func(raw []byte, limit uint32) bool {
+		return bytes.HasPrefix(raw, []byte("\x4f\x62\x6a\x01"))
+	}
+	mimetype.Extend(avroDetector, "application/avro", ".avro")
 
 	err := os.MkdirAll(config.Settings.Get(config.DATA_FOLDER), 0700)
 	if err != nil {

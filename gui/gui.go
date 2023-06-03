@@ -89,7 +89,11 @@ func FileView(next http.Handler) http.Handler {
 			}
 			metadata, _ := json.Marshal(hdr.PAXRecords)
 			fmt.Fprintf(w, "<tr><td>%d</td>", count)
-			fmt.Fprintf(w, "<td><a href=..\\..\\..\\..\\..\\get\\%v>%v</a></td>", hdr.Name, hdr.Name)
+			fmt.Fprintf(w, "<td><a href=..\\..\\..\\..\\..\\get\\%v>%v</a>", hdr.Name, hdr.Name)
+			if hdr.Gname == "application/avro" {
+				fmt.Fprintf(w, "<a href=..\\..\\..\\..\\..\\get\\%v?parse=avro> <img src=/static/avro.svg></a>", hdr.Name)
+			}
+			fmt.Fprintf(w, "</td>")
 			fmt.Fprintf(w, "<td>%d</td>", hdr.Size)
 			fmt.Fprintf(w, "<td>%d</td>", hdr.Uid)
 			fmt.Fprintf(w, "<td>%.2f</td>", (float64)((float64)(hdr.Size)/(float64)(hdr.Uid)))
