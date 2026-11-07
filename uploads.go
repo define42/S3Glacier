@@ -132,8 +132,6 @@ func writeUploadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, archive.ErrInvalidEntry):
 		status = http.StatusBadRequest
-	case errors.Is(err, archive.ErrConflict):
-		status = http.StatusConflict
 	case errors.Is(err, archive.ErrBusy):
 		w.Header().Set("Retry-After", "1")
 		status = http.StatusServiceUnavailable

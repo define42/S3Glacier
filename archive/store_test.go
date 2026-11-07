@@ -18,11 +18,11 @@ import (
 	"time"
 )
 
-func TestStoreAppendRoundTripAndRetries(t *testing.T) {
+func TestStoreAppendRoundTripAndRepeatedNames(t *testing.T) {
 	t.Parallel()
 	store := NewStore()
 	path := storeTestPath(t)
-	for _, size := range []int{0, 1, 511, 512, 513, 65537} {
+	for index, size := range []int{0, 1, 511, 512, 513, 65537} {
 		name := fmt.Sprintf("object-%d", size)
 		data := bytes.Repeat([]byte{'x'}, size)
 		header := storeTestHeader(name, data)
@@ -35,25 +35,26 @@ func TestStoreAppendRoundTripAndRetries(t *testing.T) {
 		if _, changed := header.PAXRecords[SHA256Key]; changed {
 			t.Fatal("Append changed the caller's PAX records")
 		}
-		before := storeTestBytes(t, path)
 		created, err = store.Append(t.Context(), path, header, data, sha256.Sum256(data))
-		if err != nil || created {
+		if err != nil || !created {
 			t.Fatalf("identical retry: created=%v err=%v", created, err)
 		}
-		if !bytes.Equal(before, storeTestBytes(t, path)) {
-			t.Fatal("identical retry changed the archive")
-		}
 		changed := []byte("different contents")
-		if _, err := store.Append(t.Context(), path, storeTestHeader(name, changed), changed, sha256.Sum256(changed)); !errors.Is(err, ErrConflict) {
-			t.Fatalf("conflicting retry: %v", err)
+		storeTestAppend(t, store, path, name, changed)
+		entries := storeTestEntries(t, NewStore(), path)
+		if len(entries) != (index+1)*3 {
+			t.Fatalf("entry count=%d, want %d including repeated names", len(entries), (index+1)*3)
+		}
+		for offset, want := range [][]byte{data, data, changed} {
+			entry := entries[index*3+offset]
+			if entry.name != name || !bytes.Equal(entry.data, want) {
+				t.Fatalf("repeated entry %d: name=%q bytes=%d", offset, entry.name, len(entry.data))
+			}
 		}
 		objects := storeTestObjects(t, NewStore(), path)
 		if got, ok := objects[name]; !ok || !bytes.Equal(got, data) {
-			t.Fatalf("round trip size %d: present=%v got %d bytes", size, ok, len(got))
+			t.Fatalf("first entry changed for size %d: present=%v got %d bytes", size, ok, len(got))
 		}
-	}
-	if got := len(storeTestObjects(t, NewStore(), path)); got != 6 {
-		t.Fatalf("object count=%d, want 6 without duplicate retries", got)
 	}
 }
 
@@ -79,7 +80,7 @@ func TestStoreRepairsSameSizeFooterDamage(t *testing.T) {
 
 func TestStoreRejectsCorruptMetadataAndShortArchives(t *testing.T) {
 	t.Parallel()
-	for _, change := range []string{"missing checkpoint", "invalid json", "checksum", "generation", "short archive", "split entry"} {
+	for _, change := range []string{"missing checkpoint", "invalid json", "checksum", "generation", "short archive", "split entry", "missing last digest", "malformed last digest"} {
 		t.Run(change, func(t *testing.T) {
 			t.Parallel()
 			path := storeTestPath(t)
@@ -107,6 +108,21 @@ func TestStoreRejectsCorruptMetadataAndShortArchives(t *testing.T) {
 			case "split entry":
 				c.DataEnd -= blockSize
 				storeTestWriteCheckpoint(t, path, c, true)
+			case "missing last digest", "malformed last digest":
+				contents := storeTestBytes(t, path)
+				entry := contents[c.LastStart:c.DataEnd]
+				at := bytes.Index(entry, []byte(SHA256Key+"="))
+				if at < 0 {
+					t.Fatal("fixture did not contain a PAX checksum")
+				}
+				if change == "missing last digest" {
+					copy(entry[at:], strings.Repeat("X", len(SHA256Key)))
+				} else {
+					copy(entry[at+len(SHA256Key)+1:], strings.Repeat("z", 64))
+				}
+				if err := os.WriteFile(path, contents, 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before := storeTestBytes(t, path)
 			store := NewStore()
@@ -233,56 +249,6 @@ func TestStoreCreatingCheckpointCannotResetExistingData(t *testing.T) {
 			}
 			if !bytes.Equal(tarBefore, storeTestBytes(t, path)) || !bytes.Equal(checkpointBefore, storeTestBytes(t, CommitPath(path))) {
 				t.Fatal("creating-state validation changed existing files")
-			}
-		})
-	}
-}
-
-func TestStoreRejectsCorruptIntermediateEntriesBeforeAppend(t *testing.T) {
-	t.Parallel()
-	for _, change := range []string{"intermediate zero blocks", "missing older digest", "malformed older digest"} {
-		t.Run(change, func(t *testing.T) {
-			t.Parallel()
-			store := NewStore()
-			path := storeTestPath(t)
-			firstData := []byte("first object")
-			storeTestAppend(t, store, path, "first", firstData)
-			first := storeTestCheckpoint(t, path)
-			storeTestAppend(t, store, path, "middle", []byte("middle object"))
-			middle := storeTestCheckpoint(t, path)
-			storeTestAppend(t, store, path, "latest", []byte("latest object"))
-			contents := storeTestBytes(t, path)
-			if change == "intermediate zero blocks" {
-				clear(contents[middle.LastStart : middle.LastStart+footerSize])
-			} else {
-				entry := contents[first.LastStart:first.DataEnd]
-				marker := []byte(SHA256Key + "=" + fmt.Sprintf("%x", sha256.Sum256(firstData)))
-				at := bytes.Index(entry, marker)
-				if at < 0 {
-					t.Fatal("fixture did not contain the expected PAX checksum")
-				}
-				if change == "missing older digest" {
-					copy(entry[at:], strings.Repeat("X", len(SHA256Key)))
-				} else {
-					copy(entry[at+len(SHA256Key)+1:], strings.Repeat("z", 64))
-				}
-			}
-			if err := os.WriteFile(path, contents, 0600); err != nil {
-				t.Fatal(err)
-			}
-			checkpointBefore := storeTestBytes(t, CommitPath(path))
-			names := []string{"new"}
-			if change != "intermediate zero blocks" {
-				names = append(names, "first")
-			}
-			for _, name := range names {
-				data := []byte("must not be appended")
-				if created, err := store.Append(t.Context(), path, storeTestHeader(name, data), data, sha256.Sum256(data)); created || !errors.Is(err, ErrCorrupt) {
-					t.Fatalf("Append %q to corrupt committed prefix: created=%v err=%v", name, created, err)
-				}
-				if !bytes.Equal(contents, storeTestBytes(t, path)) || !bytes.Equal(checkpointBefore, storeTestBytes(t, CommitPath(path))) {
-					t.Fatal("committed-prefix validation changed existing files")
-				}
 			}
 		})
 	}
@@ -423,79 +389,123 @@ func TestStoreCheckpointRenameFailureDoesNotRollBackData(t *testing.T) {
 	if len(objects) != 2 || !bytes.Equal(objects["uncertain"], data) {
 		t.Fatalf("surviving checkpoint lost its data: %v", objects)
 	}
-	before := storeTestBytes(t, path)
-	if created, err := restarted.Append(t.Context(), path, storeTestHeader("uncertain", data), data, sha256.Sum256(data)); err != nil || created {
-		t.Fatalf("lost-response retry: created=%v err=%v", created, err)
-	}
-	if !bytes.Equal(before, storeTestBytes(t, path)) {
-		t.Fatal("lost-response retry appended a duplicate")
+	storeTestAppend(t, restarted, path, "uncertain", data)
+	entries := storeTestEntries(t, restarted, path)
+	if len(entries) != 3 || entries[0].name != "acknowledged" || entries[1].name != "uncertain" || entries[2].name != "uncertain" || !bytes.Equal(entries[1].data, data) || !bytes.Equal(entries[2].data, data) {
+		t.Fatal("lost-response retry did not append a second copy after the original entries")
 	}
 }
 
-func TestStoreReadAndRetryConfirmCheckpointDurability(t *testing.T) {
+func TestStoreReadConfirmsCheckpointDurability(t *testing.T) {
 	t.Parallel()
-	for _, operation := range []string{"open", "identical retry"} {
-		for _, fail := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/failure=%v", operation, fail), func(t *testing.T) {
-				t.Parallel()
-				path := storeTestPath(t)
-				data := []byte("an existing ready checkpoint")
-				storeTestAppend(t, NewStore(), path, "acknowledged", data)
-				tarBefore, checkpointBefore := storeTestBytes(t, path), storeTestBytes(t, CommitPath(path))
-				store := NewStore()
-				beforeSync, confirmed := false, false
-				store.hook = func(stage string) error {
-					if stage == "checkpoint.confirm-before-sync" {
-						beforeSync = true
-						if fail {
-							return syscall.EIO
-						}
-					} else if stage == "checkpoint.confirmed" {
-						confirmed = true
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure=%v", fail), func(t *testing.T) {
+			t.Parallel()
+			path := storeTestPath(t)
+			data := []byte("an existing ready checkpoint")
+			storeTestAppend(t, NewStore(), path, "acknowledged", data)
+			tarBefore, checkpointBefore := storeTestBytes(t, path), storeTestBytes(t, CommitPath(path))
+			store := NewStore()
+			beforeSync, confirmed := false, false
+			store.hook = func(stage string) error {
+				if stage == "checkpoint.confirm-before-sync" {
+					beforeSync = true
+					if fail {
+						return syscall.EIO
 					}
-					return nil
+				} else if stage == "checkpoint.confirmed" {
+					confirmed = true
 				}
-				var err error
-				if operation == "open" {
-					var reader *Reader
-					reader, err = store.Open(t.Context(), path)
-					if !fail && reader == nil {
-						t.Fatalf("confirmed checkpoint returned no Reader: %v", err)
-					}
+				return nil
+			}
+			reader, err := store.Open(t.Context(), path)
+			if !fail && reader == nil {
+				t.Fatalf("confirmed checkpoint returned no Reader: %v", err)
+			}
+			if reader != nil {
+				reader.Close()
+				if !confirmed {
+					t.Fatal("Reader was exposed before confirming checkpoint directory durability")
+				}
+			}
+			if !beforeSync {
+				t.Fatal("ready checkpoint bypassed the confirmation barrier")
+			}
+			if fail {
+				if !errors.Is(err, ErrUnavailable) || confirmed {
+					t.Fatalf("failed confirmation: err=%v confirmed=%v", err, confirmed)
+				}
+				if reader, err := store.Open(t.Context(), path); !errors.Is(err, ErrUnavailable) || reader != nil {
 					if reader != nil {
 						reader.Close()
-						if !confirmed {
-							t.Fatal("Reader was exposed before confirming checkpoint directory durability")
-						}
 					}
-				} else {
-					var created bool
-					created, err = store.Append(t.Context(), path, storeTestHeader("acknowledged", data), data, sha256.Sum256(data))
-					if created {
-						t.Fatal("identical retry created a new entry")
+					t.Fatalf("failed confirmation did not quarantine the path: %v", err)
+				}
+			} else if err != nil || !confirmed {
+				t.Fatalf("checkpoint confirmation: err=%v confirmed=%v", err, confirmed)
+			}
+			if !bytes.Equal(tarBefore, storeTestBytes(t, path)) || !bytes.Equal(checkpointBefore, storeTestBytes(t, CommitPath(path))) {
+				t.Fatal("confirmation modified the existing TAR or checkpoint")
+			}
+		})
+	}
+}
+
+func TestStoreRepeatedNameRequiresDurableCommit(t *testing.T) {
+	t.Parallel()
+	for _, failureStage := range []string{"", "tar.before-sync", "checkpoint.before-dir-sync"} {
+		t.Run("failure="+failureStage, func(t *testing.T) {
+			t.Parallel()
+			path := storeTestPath(t)
+			data := []byte("identical content on every attempt")
+			storeTestAppend(t, NewStore(), path, "repeated", data)
+			before := storeTestBytes(t, path)
+			original := storeTestCheckpoint(t, path)
+			store := NewStore()
+			committed := false
+			store.hook = func(stage string) error {
+				if stage == failureStage {
+					return syscall.EIO
+				}
+				if stage == "checkpoint.committed" {
+					committed = true
+				}
+				return nil
+			}
+			created, err := store.Append(t.Context(), path, storeTestHeader("repeated", data), data, sha256.Sum256(data))
+			if failureStage == "" {
+				if err != nil || !created || !committed {
+					t.Fatalf("repeated append did not commit: created=%v committed=%v err=%v", created, committed, err)
+				}
+			} else {
+				if !errors.Is(err, ErrUnavailable) || created || committed {
+					t.Fatalf("failed repeated append was acknowledged: created=%v committed=%v err=%v", created, committed, err)
+				}
+				if reader, err := store.Open(t.Context(), path); !errors.Is(err, ErrUnavailable) || reader != nil {
+					if reader != nil {
+						reader.Close()
 					}
+					t.Fatalf("failed repeated append did not quarantine archive: %v", err)
 				}
-				if !beforeSync {
-					t.Fatal("ready checkpoint bypassed the confirmation barrier")
+			}
+			restarted := NewStore()
+			entries := storeTestEntries(t, restarted, path)
+			want := 2
+			if failureStage == "tar.before-sync" {
+				want = 1
+			}
+			if len(entries) != want {
+				t.Fatalf("recovered entry count=%d, want %d", len(entries), want)
+			}
+			for _, entry := range entries {
+				if entry.name != "repeated" || !bytes.Equal(entry.data, data) {
+					t.Fatal("repeated append damaged an entry")
 				}
-				if fail {
-					if !errors.Is(err, ErrUnavailable) || confirmed {
-						t.Fatalf("failed confirmation: err=%v confirmed=%v", err, confirmed)
-					}
-					if reader, err := store.Open(t.Context(), path); !errors.Is(err, ErrUnavailable) || reader != nil {
-						if reader != nil {
-							reader.Close()
-						}
-						t.Fatalf("failed confirmation did not quarantine the path: %v", err)
-					}
-				} else if err != nil || !confirmed {
-					t.Fatalf("checkpoint confirmation: err=%v confirmed=%v", err, confirmed)
-				}
-				if !bytes.Equal(tarBefore, storeTestBytes(t, path)) || !bytes.Equal(checkpointBefore, storeTestBytes(t, CommitPath(path))) {
-					t.Fatal("confirmation modified the existing TAR or checkpoint")
-				}
-			})
-		}
+			}
+			if !bytes.Equal(before[:original.DataEnd], storeTestBytes(t, path)[:original.DataEnd]) {
+				t.Fatal("repeated append rewrote the original committed prefix")
+			}
+		})
 	}
 }
 
@@ -624,17 +634,33 @@ func storeTestAppend(t *testing.T, store *Store, path, name string, data []byte)
 
 func storeTestObjects(t *testing.T, store *Store, path string) map[string][]byte {
 	t.Helper()
+	objects := make(map[string][]byte)
+	for _, entry := range storeTestEntries(t, store, path) {
+		if _, exists := objects[entry.name]; !exists {
+			objects[entry.name] = entry.data
+		}
+	}
+	return objects
+}
+
+type storeTestEntry struct {
+	name string
+	data []byte
+}
+
+func storeTestEntries(t *testing.T, store *Store, path string) []storeTestEntry {
+	t.Helper()
 	reader, err := store.Open(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	objects := make(map[string][]byte)
+	var entries []storeTestEntry
 	tr := tar.NewReader(reader)
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return objects
+			return entries
 		}
 		if err != nil {
 			t.Fatalf("read recovered TAR: %v", err)
@@ -646,10 +672,7 @@ func storeTestObjects(t *testing.T, store *Store, path string) map[string][]byte
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, exists := objects[h.Name]; exists {
-			t.Fatalf("duplicate committed entry %q", h.Name)
-		}
-		objects[h.Name] = data
+		entries = append(entries, storeTestEntry{name: h.Name, data: data})
 	}
 }
 

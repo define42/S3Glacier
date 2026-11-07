@@ -20,7 +20,7 @@
 - [bucket](bucket/store.go): immutable bucket definitions and creation.
 - [shared](shared/shared.go): UUID resolution, archive placement, and object I/O.
 - [archive](archive/store.go): process-local archive locks, durable checkpoints,
-  immutable object retries, recovery, and coordinated eviction.
+  appends, recovery, and coordinated eviction.
 - [s3](s3/s3.go): S3 credential registry and V2/V4 authentication dispatch.
 - [autoclean](autoclean/autoclean.go): global disk-pressure archive removal.
 - [config](config/settings.go): environment settings; startup logs include their values.
@@ -34,9 +34,12 @@ in-memory locks are keyed by full bucket/hour/shard and do not cross hours. One
 lifetime .server.lock enforces standalone-server ownership; use a local filesystem
 with file/directory sync, atomic rename, and power-safe overwrite semantics.
 An object name must contain a supported lowercase UUID v1 or timestamped UUID v4.
-Uploads buffer a complete object in memory. Identical UUID/content retries are
-idempotent; conflicting bytes return 409. Successful uploads sync the TAR and
-checkpoint before acknowledgment. Recovery hides uncommitted tails; archives
+Uploads buffer a complete object in memory. Every accepted upload appends an entry,
+including repeated UUIDs with the same or different bytes. GET/HEAD return the
+first committed match; later duplicates consume storage and appear in TAR browsing
+and raw exports. Lost-response retries may add duplicates and are not idempotent.
+Successful uploads sync the TAR and checkpoint before acknowledgment.
+Recovery hides uncommitted tails; archives
 without the checkpoint/manifest format are not automatically migrated.
 Per-object overwrite/delete, S3 object listing,
 and S3 multipart upload are unsupported. HTTP multipart upload is supported.

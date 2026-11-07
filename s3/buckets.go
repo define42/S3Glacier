@@ -212,8 +212,6 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 			switch {
 			case errors.Is(err, archive.ErrInvalidEntry):
 				writeS3Error(w, r, http.StatusBadRequest, "InvalidArgument", "The object metadata cannot be stored in an archive.")
-			case errors.Is(err, archive.ErrConflict):
-				writeS3Error(w, r, http.StatusConflict, "Conflict", "This UUID already identifies different object content.")
 			case errors.Is(err, archive.ErrBusy):
 				w.Header().Set("Retry-After", "1")
 				writeS3Error(w, r, http.StatusServiceUnavailable, "SlowDown", "The archive is busy; try again.")

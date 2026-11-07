@@ -297,7 +297,7 @@ func getObject(b bucket.Bucket, id string) *httptest.ResponseRecorder {
 	return out
 }
 
-func TestUploadToBucketIdempotentRetries(t *testing.T) {
+func TestUploadToBucketAppendsRepeatedUUIDs(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload []byte
@@ -315,7 +315,7 @@ func TestUploadToBucketIdempotentRetries(t *testing.T) {
 			}
 			beforeCounter := completedUploadCount(t)
 			path := uploadObject(t, b, v4ID, tc.payload)
-			beforeFiles := archiveState(t, path)
+			originalContentType := getObject(b, v4ID).Header().Get("Content-Type")
 			previousStore := archive.Default
 			archive.Default = archive.NewStore()
 			t.Cleanup(func() { archive.Default = previousStore })
@@ -324,29 +324,37 @@ func TestUploadToBucketIdempotentRetries(t *testing.T) {
 			if err != nil || id != v4ID || gotPath != path {
 				t.Fatalf("retry: id=%q path=%q err=%v", id, gotPath, err)
 			}
-			if got := archiveState(t, path); !maps.Equal(got, beforeFiles) {
-				t.Fatal("identical retry changed archive or checkpoint")
+			if got := countArchiveObjects(t, path); got != 2 {
+				t.Fatalf("identical retry stored %d object entries, want 2", got)
 			}
-			conflict := append(bytes.Clone(tc.payload), []byte("different")...)
-			request = httptest.NewRequest(http.MethodPut, "/data/conflict", bytes.NewReader(conflict))
-			if _, _, err := shared.UploadToBucket(request, b, v4ID, conflict); !errors.Is(err, archive.ErrConflict) {
-				t.Fatalf("different content error=%v, want ErrConflict", err)
+			different := []byte("%PDF-1.7\ndifferent content\n")
+			request = httptest.NewRequest(http.MethodPut, "/data/duplicate", bytes.NewReader(different))
+			if _, _, err := shared.UploadToBucket(request, b, v4ID, different); err != nil {
+				t.Fatalf("same UUID with different content: %v", err)
 			}
-			if got := archiveState(t, path); !maps.Equal(got, beforeFiles) {
-				t.Fatal("conflicting retry changed archive or checkpoint")
+			if got := countArchiveObjects(t, path); got != 3 {
+				t.Fatalf("different payload stored %d object entries, want 3", got)
 			}
+			archive.Default = archive.NewStore()
 			out := getObject(b, v4ID)
-			if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), tc.payload) {
+			if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), tc.payload) || out.Header().Get("Content-Type") != originalContentType {
 				t.Fatalf("original object changed: %d %q", out.Code, out.Body.Bytes())
 			}
-			if got := completedUploadCount(t) - beforeCounter; got != 1 {
-				t.Fatalf("completed uploads increased by %v, want 1", got)
+			request = httptest.NewRequest(http.MethodHead, "/data/"+v4ID, nil)
+			request = mux.SetURLVars(request, map[string]string{"id": v4ID})
+			out = httptest.NewRecorder()
+			shared.GetBucketFile(out, request, b)
+			if out.Code != http.StatusOK || out.Header().Get("Content-Length") != strconv.Itoa(len(tc.payload)) || out.Header().Get("Content-Type") != originalContentType || out.Body.Len() != 0 {
+				t.Fatalf("HEAD no longer describes the first entry: status=%d headers=%v body=%q", out.Code, out.Header(), out.Body.String())
+			}
+			if got := completedUploadCount(t) - beforeCounter; got != 3 {
+				t.Fatalf("completed uploads increased by %v, want 3", got)
 			}
 		})
 	}
 }
 
-func TestUploadToBucketConcurrentIdenticalRetries(t *testing.T) {
+func TestUploadToBucketConcurrentRepeatedUUIDs(t *testing.T) {
 	root := configureStorage(t)
 	b, err := openBuckets(t, root).Get("data")
 	if err != nil {
@@ -373,13 +381,20 @@ func TestUploadToBucketConcurrentIdenticalRetries(t *testing.T) {
 			t.Fatalf("concurrent retry failed: %v", err)
 		}
 	}
-	if got := completedUploadCount(t) - beforeCounter; got != 1 {
-		t.Fatalf("completed uploads increased by %v, want 1", got)
+	if got := completedUploadCount(t) - beforeCounter; got != 8 {
+		t.Fatalf("completed uploads increased by %v, want 8", got)
 	}
 	path, _, err := shared.GetBucketContainerFile(b, v4ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if objects := countArchiveObjects(t, path); objects != 8 {
+		t.Fatalf("concurrent retries stored %d object entries, want 8", objects)
+	}
+}
+
+func countArchiveObjects(t *testing.T, path string) int {
+	t.Helper()
 	reader, err := archive.Default.Open(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -399,9 +414,7 @@ func TestUploadToBucketConcurrentIdenticalRetries(t *testing.T) {
 			objects++
 		}
 	}
-	if objects != 1 {
-		t.Fatalf("concurrent retries stored %d object entries, want 1", objects)
-	}
+	return objects
 }
 
 type archiveFileState struct {

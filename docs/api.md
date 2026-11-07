@@ -23,7 +23,7 @@ Names contain 3–63 lowercase letters, digits, or hyphens, with a letter or dig
 
 Object IDs must contain a lowercase UUID version 1 or a timestamped version 4 UUID such as `20261107-1200-4000-8000-000000000001`. Use `/uuid` or `/uuidv1` to generate one. The UUID is extracted from a filename or ID containing it; downloads address that extracted UUID. S3 object keys are a single path segment, rather than arbitrary S3 key hierarchies.
 
-Use a fresh UUID for each different object. Retrying the same extracted UUID in the same bucket with identical original bytes succeeds without appending another entry. Reusing that UUID with different bytes returns `409 Conflict`; objects are not overwritten. Single-object deletion is unavailable; automatic cleanup removes whole archive files. See [storage and retention](../README.md#storage-and-retention) for the on-disk layout and retention behavior.
+Use a fresh UUID for each different object. Every accepted upload appends an entry, including repeated UUIDs with identical or different bytes. Existing entries are never overwritten: HTTP and S3 GET/HEAD return the first committed match for the extracted UUID in that bucket. Later duplicates consume storage and appear in TAR browsing and raw TAR downloads. Object uploads do not reject duplicates with `409` and are not idempotent. Single-object deletion is unavailable; automatic cleanup removes whole archive files. See [storage and retention](../README.md#storage-and-retention) for the on-disk layout and retention behavior.
 
 ## JSON bucket management
 
@@ -106,7 +106,7 @@ A `read_token` multipart field is used only to construct the resulting download 
 
 Uploads are buffered before archive writes. The multipart parser's 32 MiB in-memory threshold is not an overall request-size limit. There is no resumable upload API.
 
-Success is acknowledged only after the TAR contents and committed-boundary checkpoint are synced. An interrupted append is rolled back to that boundary before the archive is read or written again. A timeout or lost response can leave the client uncertain whether a write committed; retry the same UUID and bytes to resolve that safely. `newuuid` uploads generate fresh IDs for every request and therefore do not provide this retry behavior across separate requests.
+Success is acknowledged only after the TAR contents and committed-boundary checkpoint are synced. An interrupted append is rolled back to that boundary before the archive is read or written again. A timeout or lost response can leave the client uncertain whether a write committed. Retrying always appends another entry if accepted, even with the same UUID and bytes, so the archive may contain duplicates. `newuuid` uploads generate fresh IDs for every request; neither mode provides idempotent retries.
 
 Downloads decompress stored objects automatically. `Content-Length` describes the decoded object when no parser is requested. `?parse=avro` converts Avro object-container data to JSON; it is an application extension, not an S3 operation. Range requests and conditional GET handling are not implemented.
 
@@ -140,9 +140,9 @@ Use path-style URLs, static access keys from the S3 settings, and a signing regi
 | `PUT /{bucket}` or `PUT /{bucket}/` | Write | `200`, creates the bucket. Requires `X-Amz-Meta-Tar-Files-Per-Hour`. |
 | `HEAD /{bucket}` | Read | `200` for an existing bucket; response includes its TAR count header. |
 | `GET /{bucket}?location` | Read | `200`, empty XML `LocationConstraint` and TAR count header. |
-| `PUT /{bucket}/{id}` | Write | `200`, stores an object and returns a quoted MD5 `ETag`. |
-| `GET /{bucket}/{id}` | Read | `200`, decoded object bytes. |
-| `HEAD /{bucket}/{id}` | Read | `200` and object headers, with no body. |
+| `PUT /{bucket}/{id}` | Write | `200`, appends an object entry and returns a quoted MD5 `ETag` for the uploaded bytes. |
+| `GET /{bucket}/{id}` | Read | `200`, decoded bytes from the first committed match. |
+| `HEAD /{bucket}/{id}` | Read | `200` and headers from the first committed match, with no body. |
 
 The creation header must appear exactly once with an integer count and must be included in the signature. The same header is returned by successful bucket creation, inspection, and location lookup. Existing buckets return `409 BucketAlreadyOwnedByYou`; a new count never changes their layout. Supplying the count only as a query parameter or standard S3 `CreateBucketConfiguration` XML does not replace this header requirement. Generic SDK bucket creation therefore needs a way to add and sign this custom header; creating a bucket through the JSON API is another option.
 
@@ -196,7 +196,7 @@ V4 validates supplied CRC32, CRC32C, CRC64NVME, SHA-1, and SHA-256 checksums in 
 
 ## Errors
 
-The HTTP management and application endpoints return plain-text errors, even when successful responses are JSON or HTML. Common statuses are `400` for invalid input, `403` for a missing or incorrect configured token, `404` for a missing bucket/object, `409` for an existing bucket or a UUID whose bytes conflict with the stored object, `405` for an unsupported method, `503` for a busy or quarantined archive, and `500` for other storage or recovery failures.
+The HTTP management and application endpoints return plain-text errors, even when successful responses are JSON or HTML. Common statuses are `400` for invalid input, `403` for a missing or incorrect configured token, `404` for a missing bucket/object, `409` for an existing bucket, `405` for an unsupported method, `503` for a busy or quarantined archive, and `500` for other storage or recovery failures.
 
 S3 failures use `application/xml` with `Code`, `Message`, and `Resource`, for example:
 
@@ -208,4 +208,4 @@ S3 failures use `application/xml` with `Code`, `Message`, and `Resource`, for ex
 </Error>
 ```
 
-Common S3 codes include `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `RequestTimeTooSkewed`, `InvalidToken`, `InvalidArgument`, `InvalidBucketName`, `NoSuchBucket`, `NoSuchKey`, `BucketAlreadyOwnedByYou`, `Conflict`, `BadDigest`, `SlowDown`, `ServiceUnavailable`, and `NotImplemented`. Object-content conflicts return `409 Conflict`; this is separate from bucket-creation conflicts. HEAD responses do not carry error bodies; use their status code. Neither API returns a JSON error envelope.
+Common S3 codes include `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `RequestTimeTooSkewed`, `InvalidToken`, `InvalidArgument`, `InvalidBucketName`, `NoSuchBucket`, `NoSuchKey`, `BucketAlreadyOwnedByYou`, `BadDigest`, `SlowDown`, `ServiceUnavailable`, and `NotImplemented`. Recreating an existing bucket returns `409 BucketAlreadyOwnedByYou`; repeated object UUIDs append another entry. HEAD responses do not carry error bodies; use their status code. Neither API returns a JSON error envelope.

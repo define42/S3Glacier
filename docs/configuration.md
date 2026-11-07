@@ -133,16 +133,20 @@ the checkpoint/manifest format are rejected; there is no automatic adoption or
 migration of older archives.
 
 Before an upload is acknowledged, the server syncs the TAR, writes and syncs a
-new checkpoint, atomically publishes it, and syncs its directory. Reads and
-identical retries confirm directory durability before exposing existing state,
-including after a process restart. Recovery runs
-under the exclusive archive lock and restores the committed boundary and footer
-before serving the archive. If a storage write or sync fails, that archive is
+new checkpoint, atomically publishes it, and syncs its directory. Reads confirm
+directory durability before exposing existing state, including after a process
+restart. Recovery runs under the exclusive archive lock and restores the committed
+boundary and footer before serving the archive. If a storage write or sync fails, that archive is
 quarantined for reads and appends. Restarting alone is insufficient after an
 actual I/O or sync failure: repair the storage and verify or recover its durable
 filesystem state before restarting the server. Pressure cleanup may still
 durably remove a quarantined archive and its
 checkpoint, allowing a later write to create a fresh generation.
+
+Every accepted upload appends an entry, including repeated UUIDs. Existing entries
+are never overwritten; GET and HEAD return the first committed match. Later
+duplicates consume storage and remain visible in TAR browsing and raw exports.
+Retrying after a lost response may create duplicates; uploads are not idempotent.
 
 The supported storage target is a local filesystem that honors file and directory
 sync, atomic rename, and power-safe overwrite semantics. Checkpoints establish
@@ -232,7 +236,7 @@ The service exposes Prometheus metrics at `/metrics`:
 | Metric | Meaning |
 | --- | --- |
 | `rawupload_processed_total` | Upload attempts admitted by HTTP/S3 handlers; multipart requests count per file. |
-| `rawupload_processed_total_done` | New durably committed objects; identical successful retries do not increment this counter. |
+| `rawupload_processed_total_done` | Durably committed upload entries, including repeated UUIDs. |
 | `disk_free` | Free bytes on the filesystem containing `DATA_FOLDER`. |
 | `disk_used_percent` | Used percentage on that filesystem. |
 | `tar_files_open` | Active archive append calls, including lock waits and recovery; excludes readers and compression. |
@@ -240,10 +244,10 @@ The service exposes Prometheus metrics at `/metrics`:
 
 Filesystem capacity gauges update about once per second. The retained-window
 gauge updates with cleanup passes. A disk-stat failure leaves the capacity gauges
-at their last recorded values. Attempt and completion counters do not directly
-give a failure count, because successful identical retries add no new committed
-object. A successful archive write counter is not a
-guarantee of replication or a checksum audit of all previously stored objects.
+at their last recorded values. Both upload counters include repeated UUIDs;
+in-flight attempts need not yet have matching completions. A successful archive
+write counter is not a guarantee of replication or a checksum audit of all
+previously stored objects.
 
 Implementation references: [`config/settings.go`](../config/settings.go),
 [`main.go`](../main.go), [`acme.go`](../acme.go),

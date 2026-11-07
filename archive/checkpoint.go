@@ -115,7 +115,7 @@ func syncDirectory(path string) error {
 
 // A process can die after renaming a synced checkpoint but before syncing its
 // directory. A new process may see that cached rename, so establish durability
-// before exposing the archive or acknowledging an identical retry.
+// before exposing the archive to a reader.
 func (s *Store) confirmCheckpoint(path string) error {
 	if err := s.step("checkpoint.confirm-before-sync"); err != nil {
 		return err

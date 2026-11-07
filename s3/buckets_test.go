@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"archive/tar"
 	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
@@ -12,11 +13,13 @@ import (
 	"glacier/bucket"
 	"glacier/config"
 	"glacier/shared"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -334,7 +337,7 @@ func assertErrorCode(t *testing.T, response *httptest.ResponseRecorder, want str
 	}
 }
 
-func TestObjectHandlerIdempotentPUT(t *testing.T) {
+func TestObjectHandlerAppendsRepeatedPUTs(t *testing.T) {
 	for _, version := range []string{"v2", "v4"} {
 		t.Run(version, func(t *testing.T) {
 			store := openTestStore(t)
@@ -366,31 +369,66 @@ func TestObjectHandlerIdempotentPUT(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			before := snapshotS3Archive(t, path)
 			retry := put(payload)
 			if retry.Code != http.StatusOK || retry.Header().Get("ETag") != first.Header().Get("ETag") {
 				t.Fatalf("identical retry: %d etag=%q first=%q", retry.Code, retry.Header().Get("ETag"), first.Header().Get("ETag"))
 			}
-			if !maps.Equal(snapshotS3Archive(t, path), before) {
-				t.Fatal("identical PUT changed archive or checkpoint")
+			if got := countS3ArchiveEntries(t, path, id); got != 2 {
+				t.Fatalf("identical PUT stored %d entries, want 2", got)
 			}
-			conflict := put([]byte("different S3 content"))
-			if conflict.Code != http.StatusConflict {
-				t.Fatalf("conflicting PUT: %d %s", conflict.Code, conflict.Body.String())
+			different := []byte("different S3 content")
+			duplicate := put(different)
+			if duplicate.Code != http.StatusOK {
+				t.Fatalf("PUT different content under the same UUID: %d %s", duplicate.Code, duplicate.Body.String())
 			}
-			assertErrorCode(t, conflict, "Conflict")
-			if conflict.Header().Get("ETag") != "" {
-				t.Fatal("conflicting PUT returned a successful ETag")
+			hash := md5.Sum(different)
+			if want := `"` + hex.EncodeToString(hash[:]) + `"`; duplicate.Header().Get("ETag") != want {
+				t.Fatalf("duplicate PUT ETag=%q, want %q", duplicate.Header().Get("ETag"), want)
 			}
-			if !maps.Equal(snapshotS3Archive(t, path), before) {
-				t.Fatal("conflicting PUT changed archive or checkpoint")
+			if got := countS3ArchiveEntries(t, path, id); got != 3 {
+				t.Fatalf("different PUT stored %d entries, want 3", got)
 			}
+			previousStore := archive.Default
+			archive.Default = archive.NewStore()
+			t.Cleanup(func() { archive.Default = previousStore })
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, signedRequest("GET", "/data/"+id, nil, "reader", ""))
 			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), payload) {
-				t.Fatalf("GET after conflict: %d %q", response.Code, response.Body.Bytes())
+				t.Fatalf("GET after duplicate PUT: %d %q", response.Code, response.Body.Bytes())
+			}
+			response = httptest.NewRecorder()
+			router.ServeHTTP(response, signedRequest("HEAD", "/data/"+id, nil, "reader", ""))
+			if response.Code != http.StatusOK || response.Header().Get("Content-Length") != strconv.Itoa(len(payload)) || response.Body.Len() != 0 {
+				t.Fatalf("HEAD no longer describes the first entry: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 			}
 		})
+	}
+}
+
+func countS3ArchiveEntries(t *testing.T, path, id string) int {
+	t.Helper()
+	reader, err := archive.Default.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	tr := tar.NewReader(reader)
+	count := 0
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return count
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if archive.IsInternalEntry(header) {
+			continue
+		}
+		if header.Name != id {
+			t.Fatalf("stored UUID=%q, want %q", header.Name, id)
+		}
+		count++
 	}
 }
 

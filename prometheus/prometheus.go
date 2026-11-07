@@ -19,11 +19,11 @@ var (
 		Name: "rawupload_processed_total",
 		Help: "The total number of rawupload events",
 	})
-	// RawUploadDoneProcessed counts new entries after the archive and checkpoint
-	// have been committed. Successful identical retries do not increment it.
+	// RawUploadDoneProcessed counts entries after the archive and checkpoint
+	// have been committed, including uploads that repeat an existing UUID.
 	RawUploadDoneProcessed = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "rawupload_processed_total_done",
-		Help: "The total number of rawupload events done",
+		Help: "The total number of durably committed upload entries, including repeated UUIDs",
 	})
 	// Disk_free reports free bytes on the filesystem containing DATA_FOLDER.
 	Disk_free = promauto.NewGauge(prometheus.GaugeOpts{

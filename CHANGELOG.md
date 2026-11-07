@@ -25,8 +25,10 @@ current development branch and do not imply a published version.
 - Archive coordination uses process-local locks for each full bucket/hour/shard
   path. One lifetime data-root ownership lock refuses a second standalone server;
   no per-archive lock files are created. No older checkpoint format is migrated.
-- Upload success follows durable TAR and checkpoint publication. Identical UUID
-  retries are idempotent; different content for an existing UUID returns `409`.
+- Upload success follows durable TAR and checkpoint publication. Every accepted
+  upload appends an entry, including repeated UUIDs. GET and HEAD return the first
+  committed match; later duplicates remain in the TAR and consume storage.
+  Retries after a lost response can add duplicates and are not idempotent.
 - All buckets, including `data`, store archives under
   `DATA_FOLDER/buckets/{bucket}` and immutable metadata under `DATA_FOLDER/.buckets`.
   `data` uses 256 TAR files per hour. The previous layout is not supported.
@@ -36,6 +38,7 @@ current development branch and do not imply a published version.
 
 ### Fixed
 
+- Uploads append without rescanning existing entries in the archive.
 - Archive cleanup shares the same lock as readers and writers, so deletion and
   recreation cannot bypass synchronization by locking different file inodes.
 - Pressure cleanup removes TARs before checkpoints and can reap orphan checkpoints

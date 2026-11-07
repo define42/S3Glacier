@@ -262,10 +262,11 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 }
 
 // UploadToBucket commits a complete, in-memory object after the caller authorizes
-// bucket access. It returns the normalized UUID and archive path. Retrying an
-// existing UUID with identical original bytes succeeds without another append;
-// different bytes return archive.ErrConflict. The request context controls lock
-// acquisition, and archive errors propagate to the HTTP/S3 caller.
+// bucket access. It returns the normalized UUID and archive path. Every
+// successful upload appends an entry, including repeated UUIDs with identical or
+// different bytes. GetBucketFile continues to return the first committed match.
+// The request context controls lock acquisition, and archive errors propagate
+// to the HTTP/S3 caller.
 // Compression may allocate another full buffer in addition to fileBytes.
 func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byte) (string, string, error) {
 	containerFile, uuid_id, err := GetBucketContainerFile(b, id)

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"glacier/archive"
 	"glacier/bucket"
 	"glacier/shared"
+	"io"
 	"maps"
 	"mime/multipart"
 	"net/http"
@@ -12,10 +14,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
-func TestHTTPUploadRetriesAreIdempotent(t *testing.T) {
+func TestHTTPUploadsAppendRepeatedUUIDs(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	t.Setenv("DATA_FOLDER", root)
 	t.Setenv("READ_TOKEN", "read-secret")
@@ -39,14 +42,12 @@ func TestHTTPUploadRetriesAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := snapshotHTTPArchive(t, path)
-
 	response = bucketRequest(t, router, "PUT", target, "write-secret", payload)
 	if response.Code != http.StatusOK {
 		t.Fatalf("identical raw retry: %d %s", response.Code, response.Body.String())
 	}
-	if !maps.Equal(snapshotHTTPArchive(t, path), before) {
-		t.Fatal("identical raw retry changed archive or checkpoint")
+	if got := countHTTPArchiveEntries(t, path, id); got != 2 {
+		t.Fatalf("identical raw upload stored %d entries, want 2", got)
 	}
 
 	request := retryMultipartRequest(t, id, payload)
@@ -55,32 +56,66 @@ func TestHTTPUploadRetriesAreIdempotent(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("identical multipart retry: %d %s", response.Code, response.Body.String())
 	}
-	if !maps.Equal(snapshotHTTPArchive(t, path), before) {
-		t.Fatal("identical multipart retry changed archive or checkpoint")
+	if got := countHTTPArchiveEntries(t, path, id); got != 3 {
+		t.Fatalf("identical multipart upload stored %d entries, want 3", got)
 	}
 
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name    string
 		request *http.Request
 	}{
 		{name: "raw", request: httptest.NewRequest("PUT", target, bytes.NewReader([]byte("different HTTP content")))},
 		{name: "multipart", request: retryMultipartRequest(t, id, []byte("different HTTP content"))},
 	} {
-		t.Run(tc.name+" conflict", func(t *testing.T) {
+		t.Run(tc.name+" different content", func(t *testing.T) {
 			tc.request.Header.Set("Authorization", "Bearer write-secret")
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, tc.request)
-			if response.Code != http.StatusConflict {
-				t.Fatalf("conflicting upload: %d %s", response.Code, response.Body.String())
+			if response.Code != http.StatusOK {
+				t.Fatalf("same UUID with different content: %d %s", response.Code, response.Body.String())
 			}
-			if !maps.Equal(snapshotHTTPArchive(t, path), before) {
-				t.Fatal("conflicting upload changed archive or checkpoint")
+			if got, want := countHTTPArchiveEntries(t, path, id), 4+i; got != want {
+				t.Fatalf("different content stored %d entries, want %d", got, want)
 			}
 		})
 	}
+	previousStore := archive.Default
+	archive.Default = archive.NewStore()
+	t.Cleanup(func() { archive.Default = previousStore })
 	response = bucketRequest(t, router, "GET", "/buckets/data/get/"+id, "read-secret", nil)
 	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), payload) {
-		t.Fatalf("GET after conflict: %d %q", response.Code, response.Body.Bytes())
+		t.Fatalf("GET after duplicate uploads: %d %q", response.Code, response.Body.Bytes())
+	}
+	response = bucketRequest(t, router, "HEAD", "/buckets/data/get/"+id, "read-secret", nil)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Length") != strconv.Itoa(len(payload)) || response.Body.Len() != 0 {
+		t.Fatalf("HEAD no longer describes the first entry: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func countHTTPArchiveEntries(t *testing.T, path, id string) int {
+	t.Helper()
+	reader, err := archive.Default.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	tr := tar.NewReader(reader)
+	count := 0
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return count
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if archive.IsInternalEntry(header) {
+			continue
+		}
+		if header.Name != id {
+			t.Fatalf("stored UUID=%q, want %q", header.Name, id)
+		}
+		count++
 	}
 }
 

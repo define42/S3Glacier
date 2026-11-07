@@ -3,7 +3,6 @@ package archive
 import (
 	"archive/tar"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,8 +17,6 @@ import (
 var (
 	// ErrBusy means a nonblocking archive lock could not be acquired.
 	ErrBusy = errors.New("archive is busy")
-	// ErrConflict means an object name already contains different content.
-	ErrConflict = errors.New("object already exists with different content")
 	// ErrInvalidEntry means caller-supplied metadata cannot form a regular TAR entry.
 	ErrInvalidEntry = errors.New("invalid archive entry")
 	// ErrCorrupt means the archive and its checkpoint cannot be safely reconciled.
@@ -111,48 +108,12 @@ func (s *Store) step(stage string) error {
 	return nil
 }
 
-func findObject(ctx context.Context, f *os.File, c checkpoint, name, digest string) (bool, error) {
-	section := io.NewSectionReader(f, 0, c.DataEnd)
-	tr := tar.NewReader(section)
-	for {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		h, err := tr.Next()
-		if err == io.EOF {
-			position, seekErr := section.Seek(0, io.SeekCurrent)
-			if seekErr != nil {
-				return false, seekErr
-			}
-			if position != c.DataEnd {
-				return false, fmt.Errorf("%w: premature end of committed archive", ErrCorrupt)
-			}
-			return false, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("%w: read committed entry: %v", ErrCorrupt, err)
-		}
-		if IsInternalEntry(h) {
-			continue
-		}
-		storedDigest, digestErr := hex.DecodeString(h.PAXRecords[SHA256Key])
-		if h.Typeflag != tar.TypeReg || digestErr != nil || len(storedDigest) != sha256.Size {
-			return false, fmt.Errorf("%w: invalid committed object metadata", ErrCorrupt)
-		}
-		if h.Name == name {
-			if h.PAXRecords[SHA256Key] == digest {
-				return true, nil
-			}
-			return false, ErrConflict
-		}
-	}
-}
-
 // Append commits a complete stored payload. digest describes the original,
-// uncompressed bytes. Identical name/digest retries return false without writing;
-// different bytes return ErrConflict. Successful new entries return true only
-// after the TAR and checkpoint have been synced. Cancellation controls lock wait
-// and duplicate lookup; once writing starts, the commit is completed or quarantined.
+// uncompressed bytes. Every successful call appends an entry without searching
+// existing names or overwriting earlier entries. Object readers return the first
+// committed match. Append returns true only after the TAR and checkpoint have
+// been synced. Cancellation controls lock wait and pre-write checks; once writing
+// starts, the commit is completed or quarantined.
 func (s *Store) Append(ctx context.Context, path string, header *tar.Header, data []byte, digest [32]byte) (bool, error) {
 	path, err := canonical(path)
 	if err != nil {
@@ -199,19 +160,6 @@ func (s *Store) Append(ctx context.Context, path string, header *tar.Header, dat
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return false, err
-	}
-	exists, err := findObject(ctx, f, c, header.Name, digestString)
-	if err != nil {
-		return false, errors.Join(err, f.Close())
-	}
-	if exists {
-		if err := f.Close(); err != nil {
-			return false, s.quarantine(path, err)
-		}
-		if err := s.confirmCheckpoint(path); err != nil {
-			return false, s.quarantine(path, err)
-		}
-		return false, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return false, errors.Join(err, f.Close())

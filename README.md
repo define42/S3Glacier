@@ -215,7 +215,7 @@ the original bytes.
 Each TAR has a matching `.commit` checkpoint and an internal identity manifest
 as its first entry.
 Successful uploads sync the TAR, durably publish the checkpoint, and sync its
-directory before acknowledging success. Reads and identical retries also confirm
+directory before acknowledging success. Reads also confirm
 the checkpoint's directory entry is durable, including after a process restart.
 After an interrupted append, recovery
 restores the last committed boundary and TAR footer under the exclusive lock;
@@ -260,10 +260,12 @@ optional UUID convention, not a retention guarantee.
 - Upload handlers buffer a complete object in memory, including decoded V4
   streaming uploads. Account for payload and compression buffers when choosing
   object sizes and concurrency.
-- Objects are immutable. Retrying the same UUID with identical original bytes
-  succeeds without appending another entry; different bytes return `409 Conflict`.
-  Generate a fresh UUID for a different object. An upload that generates a new
-  UUID on every request does not make those separate requests idempotent.
+- Every accepted upload appends a new entry, including repeated UUIDs with the
+  same or different bytes. An existing entry is never overwritten: GET and HEAD
+  return the first committed match. Later duplicates consume storage and appear
+  in TAR browsing and raw TAR downloads. Use a fresh UUID for each new object;
+  retries after a timeout or lost response may append duplicates and are not
+  idempotent.
 - Reads scan the selected TAR sequentially; there is no separate object index.
 - `/metrics` exposes Prometheus counters and gauges without authentication. The
   web landing page and static assets are also public; UUID helpers require the

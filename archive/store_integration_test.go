@@ -57,10 +57,20 @@ func TestStoreRecoversAfterProcessExitDuringAppend(t *testing.T) {
 			}
 			if published {
 				data := storeTestPendingPayload()
-				confirmed = false
+				committed := false
+				restarted.hook = func(stage string) error {
+					if stage == "checkpoint.committed" {
+						committed = true
+					}
+					return nil
+				}
 				created, err := restarted.Append(t.Context(), path, storeTestHeader("pending", data), data, sha256.Sum256(data))
-				if err != nil || created || !confirmed || !bytes.Equal(after, storeTestBytes(t, path)) {
-					t.Fatalf("lost-response retry was not confirmed and idempotent: created=%v confirmed=%v err=%v", created, confirmed, err)
+				if err != nil || !created || !committed {
+					t.Fatalf("lost-response retry was not durably appended: created=%v committed=%v err=%v", created, committed, err)
+				}
+				entries := storeTestEntries(t, restarted, path)
+				if len(entries) != 3 || entries[0].name != "acknowledged" || entries[1].name != "pending" || entries[2].name != "pending" || !bytes.Equal(entries[1].data, data) || !bytes.Equal(entries[2].data, data) {
+					t.Fatal("lost-response retry did not append a second copy after the existing entries")
 				}
 			} else {
 				storeTestAppend(t, restarted, path, "after-recovery", []byte("later valid append"))
@@ -68,6 +78,46 @@ func TestStoreRecoversAfterProcessExitDuringAppend(t *testing.T) {
 				if len(objects) != 2 || string(objects["after-recovery"]) != "later valid append" {
 					t.Fatal("recovery left the archive unusable for subsequent appends")
 				}
+			}
+		})
+	}
+}
+
+func TestStoreDuplicateAppendCrashPreservesFirstEntry(t *testing.T) {
+	t.Parallel()
+	for _, stage := range []string{"tar.payload", "checkpoint.renamed", "checkpoint.committed"} {
+		t.Run(stage, func(t *testing.T) {
+			path := storeTestPath(t)
+			first := []byte("first committed content remains authoritative")
+			storeTestAppend(t, NewStore(), path, "pending", first)
+			before := storeTestBytes(t, path)
+			original := storeTestCheckpoint(t, path)
+			// The helper appends the same name with different content and exits
+			// before delivering a response, possibly after publishing the commit.
+			storeTestCrash(t, path, "append", stage)
+			restarted := NewStore()
+			entries := storeTestEntries(t, restarted, path)
+			published := stage != "tar.payload"
+			want := 1
+			if published {
+				want = 2
+			}
+			if len(entries) != want || entries[0].name != "pending" || !bytes.Equal(entries[0].data, first) {
+				t.Fatalf("crashed duplicate changed first entry or count: entries=%d want=%d", len(entries), want)
+			}
+			if published && (entries[1].name != "pending" || !bytes.Equal(entries[1].data, storeTestPendingPayload())) {
+				t.Fatal("published duplicate was not preserved after restart")
+			}
+			if !bytes.Equal(before[:original.DataEnd], storeTestBytes(t, path)[:original.DataEnd]) {
+				t.Fatal("duplicate recovery rewrote the original committed prefix")
+			}
+			storeTestAppend(t, restarted, path, "pending", storeTestPendingPayload())
+			entries = storeTestEntries(t, restarted, path)
+			if len(entries) != want+1 || !bytes.Equal(entries[0].data, first) {
+				t.Fatal("retry failed to append or replaced the earliest entry")
+			}
+			if objects := storeTestObjects(t, restarted, path); !bytes.Equal(objects["pending"], first) {
+				t.Fatal("first-match lookup changed after crashed duplicate and retry")
 			}
 		})
 	}

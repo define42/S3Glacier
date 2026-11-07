@@ -54,6 +54,7 @@
     <section id="upload" aria-labelledby="upload-heading">
       <h2 class="h4" id="upload-heading">Upload files</h2>
       <p>Generate a time UUID for each file, or use filenames that already contain a time UUID.</p>
+      <p id="duplicate-uuid-help"><strong>Duplicate UUIDs never overwrite existing files.</strong> Every successful upload is stored, but downloads return only the first stored file for that UUID in the bucket. Later duplicates use additional storage. Use a new UUID for different content.</p>
       <form enctype="multipart/form-data" action="/upload?newuuid=true" method="post" data-token="write">
         <div class="form-group"><label for="upload-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="upload-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
         <div class="form-group"><label for="upload-files">Files to archive</label><input class="form-control-file" type="file" name="file" id="upload-files" multiple required></div>
@@ -63,7 +64,7 @@
       <details class="mt-4"><summary>Upload files with existing UUID filenames</summary>
         <form enctype="multipart/form-data" action="/upload" method="post" data-token="write" class="mt-3">
           <div class="form-group"><label for="named-upload-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="named-upload-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
-          <div class="form-group"><label for="named-upload-files">Files with time UUID filenames</label><input class="form-control-file" type="file" name="file" id="named-upload-files" multiple required aria-describedby="uuid-help"><small class="form-text text-muted" id="uuid-help">Use a UUID v1 or a timestamped UUID v4, such as 20261107-1036-40f1-b34f-02d7517a01d3.</small></div>
+          <div class="form-group"><label for="named-upload-files">Files with time UUID filenames</label><input class="form-control-file" type="file" name="file" id="named-upload-files" multiple required aria-describedby="uuid-help duplicate-uuid-help"><small class="form-text text-muted" id="uuid-help">Use a UUID v1 or a timestamped UUID v4, such as 20261107-1036-40f1-b34f-02d7517a01d3.</small></div>
           <input type="hidden" name="token"><input type="hidden" name="read_token">
           <button type="submit" class="btn btn-outline-primary">Upload with existing UUIDs</button>
         </form>
