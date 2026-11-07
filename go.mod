@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/linkedin/goavro v2.1.0+incompatible
+	github.com/minio/crc64nvme v1.1.1
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/olekukonko/tablewriter v1.1.5
 	github.com/prometheus/client_golang v1.25.0
@@ -40,7 +41,6 @@ require (
 	github.com/mholt/acmez v1.2.0 // indirect
 	github.com/mholt/acmez/v3 v3.1.7 // indirect
 	github.com/miekg/dns v1.1.73 // indirect
-	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

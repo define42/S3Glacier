@@ -13,7 +13,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -79,7 +81,7 @@ func BucketHandler(store *bucket.Store) S3SecurityHandle {
 				writeS3Error(w, r, http.StatusForbidden, "AccessDenied", "Write access is required to create a bucket.")
 				return
 			}
-			if len(r.URL.Query()) != 0 {
+			if len(s3OperationQuery(r)) != 0 {
 				writeS3Error(w, r, http.StatusNotImplemented, "NotImplemented", "Bucket subresources are not supported.")
 				return
 			}
@@ -126,7 +128,7 @@ func BucketHandler(store *bucket.Store) S3SecurityHandle {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			if r.URL.Query().Has("location") && len(r.URL.Query()) == 1 {
+			if query := s3OperationQuery(r); query.Has("location") && len(query) == 1 {
 				writeS3XML(w, http.StatusOK, GetBucketLocation{Xmlns: s3Namespace})
 				return
 			}
@@ -163,7 +165,7 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 			writeS3Error(w, r, http.StatusNotFound, "NoSuchBucket", "The bucket does not exist.")
 			return
 		}
-		for name := range r.URL.Query() {
+		for name := range s3OperationQuery(r) {
 			if name != "parse" {
 				writeS3Error(w, r, http.StatusNotImplemented, "NotImplemented", "Object subresources are not supported.")
 				return
@@ -181,7 +183,7 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 
 		prometheus.RawUploadProcessed.Inc()
 		defer r.Body.Close()
-		fileBytes, err := io.ReadAll(r.Body)
+		fileBytes, err := readS3Body(r)
 		if err != nil {
 			writeS3Error(w, r, http.StatusBadRequest, "IncompleteBody", "Unable to read the object body.")
 			return
@@ -206,6 +208,33 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 		w.Header().Set("ETag", `"`+hex.EncodeToString(hash[:])+`"`)
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// Authentication parameters are already verified by S3Security. They are not
+// bucket or object subresources, and must remain in the URL until signing ends.
+func s3OperationQuery(r *http.Request) url.Values {
+	query := r.URL.Query()
+	// AWS SDKs include the signed operation name as an annotation. Dispatch
+	// still follows the HTTP method and path, not this query parameter.
+	query.Del("x-id")
+	for _, name := range []string{
+		"X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires",
+		"X-Amz-SignedHeaders", "X-Amz-Signature", "X-Amz-Security-Token",
+		"X-Amz-Content-Sha256",
+	} {
+		query.Del(name)
+	}
+	if _, verifiedV4 := V4Info(r); verifiedV4 {
+		for name := range query {
+			switch strings.ToLower(name) {
+			case "x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-crc64nvme",
+				"x-amz-checksum-sha1", "x-amz-checksum-sha256", "x-amz-sdk-checksum-algorithm",
+				"x-amz-checksum-algorithm", "x-amz-checksum-type", "x-amz-checksum-mode":
+				query.Del(name)
+			}
+		}
+	}
+	return query
 }
 
 // objectResponseWriter translates shared read errors without buffering object data.

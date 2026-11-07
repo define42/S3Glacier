@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 const Authorization = "Authorization"
@@ -58,13 +59,46 @@ type S3SecurityHandle func(w http.ResponseWriter, r *http.Request, user S3User)
 
 func S3Security(next S3SecurityHandle) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(headerValues(r, "authorization")) > 1 {
+			writeS3Error(w, r, http.StatusBadRequest, "InvalidRequest", "Specify only one authorization header.")
+			return
+		}
+		if strings.HasPrefix(strings.TrimSpace(r.Header.Get(Authorization)), "AWS4-") || hasV4Query(r) {
+			user, info, err := verifyV4(r, time.Now().UTC())
+			if err != nil {
+				writeV4Error(w, r, err)
+				return
+			}
+			switch r.Method {
+			case http.MethodPut:
+				if !user.Write {
+					writeS3Error(w, r, http.StatusForbidden, "AccessDenied", "Write access is required.")
+					return
+				}
+			case http.MethodGet, http.MethodHead:
+				if !user.Read {
+					writeS3Error(w, r, http.StatusForbidden, "AccessDenied", "Read access is required.")
+					return
+				}
+			default:
+				methodNotAllowed(w, r, "GET, HEAD, PUT")
+				return
+			}
+			r = withV4Info(r, info)
+			if err := VerifyV4Payload(r, info); err != nil {
+				writeV4Error(w, r, err)
+				return
+			}
+			next(w, r, user)
+			return
+		}
 		authFields := strings.Fields(r.Header.Get(Authorization))
 		if len(authFields) == 0 {
 			writeS3Error(w, r, http.StatusForbidden, "AccessDenied", "Authentication is required.")
 			return
 		}
 		if len(authFields) != 2 || authFields[0] != signV2Algorithm {
-			writeS3Error(w, r, http.StatusBadRequest, "InvalidRequest", "AWS Signature Version 2 authentication is required.")
+			writeS3Error(w, r, http.StatusBadRequest, "InvalidRequest", "AWS Signature Version 2 or 4 authentication is required.")
 			return
 		}
 		accessKey, requestSignature, ok := strings.Cut(authFields[1], ":")

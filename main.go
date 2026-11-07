@@ -60,7 +60,9 @@ func NewServer() (*mux.Router, error) {
 
 	r := mux.NewRouter()
 	r.PathPrefix("/static/").Handler(http.FileServer(http.FS(assets)))
-	r.Handle("/", s3.S3Security(s3.ListBuckets(store))).HeadersRegexp("Authorization", "^AWS ").Methods(http.MethodGet)
+	r.Handle("/", s3.S3Security(s3.ListBuckets(store))).MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
+		return s3.IsS3Request(r)
+	}).Methods(http.MethodGet)
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, assets, "static/index.html")
 	}).Methods(http.MethodGet)

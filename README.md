@@ -26,7 +26,7 @@ Pros
 - Predictable archive count: each bucket has its own fixed maximum TAR files per hour
 - High delete performance, for aging-out(deletion) of old data
 - Automatic age-off oldest data when storage limit is reached
-- Multiple buckets with S3 Signature Version 2 support
+- Multiple buckets with S3 Signature Version 4 and Version 2 support
 - Build in prometheus support.
 - Build in ACME support.
 - Support object/blob compression.
@@ -103,7 +103,68 @@ clients that cannot add it should create the bucket through the HTTP API first.
 S3 supports listing buckets (`GET /`), bucket existence (`HEAD /{bucket}`),
 bucket location (`GET /{bucket}?location`), and object PUT/GET/HEAD. Object listing,
 object deletion and S3 multipart upload remain unsupported and return explicit
-errors. Authentication remains Signature Version 2.
+errors.
+
+### S3 Signature Version 4
+
+S3 requests support AWS Signature Version 4 (`AWS4-HMAC-SHA256`) using an
+Authorization header or presigned GET/PUT URLs. Signature Version 2 Authorization
+headers remain supported. Both versions use the same access key and secret pairs
+configured in `S3_READ_ONLY_USERS` / `S3_READ_WRITE_USERS`; read-only credentials
+cannot upload objects or create buckets.
+
+Configure clients with this server's endpoint, **path-style bucket addressing**,
+the `s3` service, and a signing region such as `us-east-1`. The server accepts any
+valid nonempty region in the credential scope; it does not provision regional
+storage. Object keys must still contain a supported time UUID.
+
+For example, with curl's
+[`--aws-sigv4` option](https://curl.se/docs/manpage.html#--aws-sigv4), set
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` to a configured read/write pair:
+
+```sh
+S3_ENDPOINT=http://localhost:8000
+OBJECT_ID=20261107-1200-4000-8000-000000000001
+
+# The fixed archive count must be supplied and signed at bucket creation.
+curl --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -X PUT "$S3_ENDPOINT/signed-files" \
+  -H 'x-amz-content-sha256: UNSIGNED-PAYLOAD' \
+  -H 'x-amz-meta-tar-files-per-hour: 4'
+
+# Upload the object with a signed SHA-256 payload hash.
+PAYLOAD_HASH=$(sha256sum example.bin | cut -d ' ' -f 1)
+curl --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H "x-amz-content-sha256: $PAYLOAD_HASH" \
+  --upload-file example.bin "$S3_ENDPOINT/signed-files/$OBJECT_ID"
+
+curl --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
+  -H 'x-amz-content-sha256: UNSIGNED-PAYLOAD' \
+  "$S3_ENDPOINT/signed-files/$OBJECT_ID" -o restored.bin
+```
+
+V4 validates signed payload hashes and also supports `UNSIGNED-PAYLOAD` requests.
+It accepts signed `aws-chunked` uploads, including signed and unsigned checksum
+trailers for CRC32, CRC32C, CRC64NVME, SHA-1, and SHA-256. Chunk framing is verified
+and removed before object storage. These are single PUT uploads; S3 multipart
+upload is a separate, unsupported API.
+
+Generate presigned URLs with an S3 SDK using V4, this server's endpoint,
+path-style addressing, and the configured static credentials. Use `get_object`
+for downloads or `put_object` for uploads to an existing bucket, with an expiry
+from **1 to 604,800 seconds**. The URL's method, host, path, query parameters, and
+any signed headers must match the request sent to the server. Presigned POST
+forms and temporary STS session credentials are unsupported.
+
+The signing formats follow the AWS documentation for
+[V4 header authentication](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html),
+[presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html),
+and [streaming uploads](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-streaming.html).
+
+### Storage and retention
 
 Storage layout:
 
