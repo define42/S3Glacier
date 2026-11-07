@@ -40,7 +40,7 @@ make lint GOLANGCI_LINT=/path/to/golangci-lint
 ```sh
 make test
 make lint
-go test -race -shuffle=on -count=1 -timeout=5m ./...
+go test -tags=integration -race -shuffle=on -count=1 -timeout=5m ./...
 CGO_ENABLED=0 go build -o /tmp/s3glacier .
 ```
 
@@ -48,6 +48,11 @@ CGO_ENABLED=0 go build -o /tmp/s3glacier .
 [CI workflow](.github/workflows/ci.yml) verifies modules, runs vet and race tests,
 and builds a static binary. Container publication is restricted to successful
 pushes to `main`.
+
+`make test` includes the `integration` build tag. Archive recovery tests terminate
+disposable child processes at write/commit boundaries using temporary data;
+they do not stop the running server or access deployment data. CI and container
+builds run these tests too. `go test ./...` runs the unit tests alone.
 
 `make modernize` applies `go fix ./...` to the working tree. Review its diff and
 run the checks afterward. To inspect suggestions without editing files, run

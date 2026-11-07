@@ -19,8 +19,8 @@ var (
 		Name: "rawupload_processed_total",
 		Help: "The total number of rawupload events",
 	})
-	// RawUploadDoneProcessed counts archive entries successfully written by storage.
-	// It reports completed writes, not a guarantee of filesystem sync to stable media.
+	// RawUploadDoneProcessed counts new entries after the archive and checkpoint
+	// have been committed. Successful identical retries do not increment it.
 	RawUploadDoneProcessed = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "rawupload_processed_total_done",
 		Help: "The total number of rawupload events done",
@@ -35,7 +35,8 @@ var (
 		Name: "disk_used_percent",
 		Help: "The total number of rawupload events done",
 	})
-	// Tar_files_open counts active archive write sections, excluding readers.
+	// Tar_files_open counts archive append calls, including lock waits and recovery,
+	// but excluding readers and the preceding compression work.
 	Tar_files_open = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "tar_files_open",
 		Help: "The total number of rawupload events done",

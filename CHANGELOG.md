@@ -7,6 +7,8 @@ current development branch and do not imply a published version.
 
 ### Added
 
+- Per-archive committed-boundary checkpoints and identity manifests, with lazy
+  recovery of interrupted appends before reads or subsequent writes.
 - Multiple buckets, each with a TAR-files-per-hour count chosen at creation and
   fixed for the lifetime of the bucket.
 - HTTP bucket management, bucket-aware upload/download and browser routes, and
@@ -20,6 +22,11 @@ current development branch and do not imply a published version.
 
 ### Changed
 
+- Archive coordination uses process-local locks for each full bucket/hour/shard
+  path. One lifetime data-root ownership lock refuses a second standalone server;
+  no per-archive lock files are created. No older checkpoint format is migrated.
+- Upload success follows durable TAR and checkpoint publication. Identical UUID
+  retries are idempotent; different content for an existing UUID returns `409`.
 - All buckets, including `data`, store archives under
   `DATA_FOLDER/buckets/{bucket}` and immutable metadata under `DATA_FOLDER/.buckets`.
   `data` uses 256 TAR files per hour. The previous layout is not supported.
@@ -29,6 +36,10 @@ current development branch and do not imply a published version.
 
 ### Fixed
 
+- Archive cleanup shares the same lock as readers and writers, so deletion and
+  recreation cannot bypass synchronization by locking different file inodes.
+- Pressure cleanup removes TARs before checkpoints and can reap orphan checkpoints
+  without allocating a deletion marker.
 - `make test` now runs the Go test suite instead of referring to a missing file.
 - `make lint` locates the configured Go binary directory without requiring it on
   the shell's PATH.

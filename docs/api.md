@@ -23,7 +23,7 @@ Names contain 3–63 lowercase letters, digits, or hyphens, with a letter or dig
 
 Object IDs must contain a lowercase UUID version 1 or a timestamped version 4 UUID such as `20261107-1200-4000-8000-000000000001`. Use `/uuid` or `/uuidv1` to generate one. The UUID is extracted from a filename or ID containing it; downloads address that extracted UUID. S3 object keys are a single path segment, rather than arbitrary S3 key hierarchies.
 
-Use a fresh UUID for each object. Reusing an ID is not rejected: uploads append another entry and reads return the first matching entry. Uploading the same ID does not replace the object. Single-object deletion is unavailable; automatic cleanup removes whole archive files. See [storage and retention](../README.md#storage-and-retention) for the on-disk layout and retention behavior.
+Use a fresh UUID for each different object. Retrying the same extracted UUID in the same bucket with identical original bytes succeeds without appending another entry. Reusing that UUID with different bytes returns `409 Conflict`; objects are not overwritten. Single-object deletion is unavailable; automatic cleanup removes whole archive files. See [storage and retention](../README.md#storage-and-retention) for the on-disk layout and retention behavior.
 
 ## JSON bucket management
 
@@ -106,6 +106,8 @@ A `read_token` multipart field is used only to construct the resulting download 
 
 Uploads are buffered before archive writes. The multipart parser's 32 MiB in-memory threshold is not an overall request-size limit. There is no resumable upload API.
 
+Success is acknowledged only after the TAR contents and committed-boundary checkpoint are synced. An interrupted append is rolled back to that boundary before the archive is read or written again. A timeout or lost response can leave the client uncertain whether a write committed; retry the same UUID and bytes to resolve that safely. `newuuid` uploads generate fresh IDs for every request and therefore do not provide this retry behavior across separate requests.
+
 Downloads decompress stored objects automatically. `Content-Length` describes the decoded object when no parser is requested. `?parse=avro` converts Avro object-container data to JSON; it is an application extension, not an S3 operation. Range requests and conditional GET handling are not implemented.
 
 ## UUID helpers and archive browsing
@@ -121,7 +123,7 @@ Downloads decompress stored objects automatically. `Content-Length` describes th
 
 UUID helpers and redirects accept `?bucket={name}`. UUID responses use the field names `Uuid`, `ContainerFile`, `Bucket`, and `TarFilesPerHour`. `ContainerFile` is a server filesystem path, not a download URL.
 
-Browser paths are dated directories such as `2026/11/07/12/` or a TAR filename within an hour. TAR pages show their object entries and offer a raw archive link. Add `?download=1` to an existing TAR path to receive an `application/x-tar` attachment, under the same read authorization and archive lock. Configuration directories and symlink paths are excluded. A busy archive can return `503` with `Retry-After: 1`.
+Browser paths are dated directories such as `2026/11/07/12/` or a TAR filename within an hour. TAR pages show committed user-object entries and offer a raw archive link. Checkpoint files and the internal archive manifest are hidden from these listings. Add `?download=1` to an existing TAR path to receive an `application/x-tar` attachment, including the manifest, under the same read authorization and archive lock. Configuration directories and symlink paths are excluded. A busy archive can return `503` with `Retry-After: 1`. Archives in an unsupported or unrecoverable checkpoint format fail rather than exposing uncommitted bytes.
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $READ_TOKEN" \
@@ -194,7 +196,7 @@ V4 validates supplied CRC32, CRC32C, CRC64NVME, SHA-1, and SHA-256 checksums in 
 
 ## Errors
 
-The HTTP management and application endpoints return plain-text errors, even when successful responses are JSON or HTML. Common statuses are `400` for invalid input, `403` for a missing or incorrect configured token, `404` for a missing bucket/object, `409` for an existing bucket, `405` for an unsupported method, and `500` for storage failures.
+The HTTP management and application endpoints return plain-text errors, even when successful responses are JSON or HTML. Common statuses are `400` for invalid input, `403` for a missing or incorrect configured token, `404` for a missing bucket/object, `409` for an existing bucket or a UUID whose bytes conflict with the stored object, `405` for an unsupported method, `503` for a busy or quarantined archive, and `500` for other storage or recovery failures.
 
 S3 failures use `application/xml` with `Code`, `Message`, and `Resource`, for example:
 
@@ -206,4 +208,4 @@ S3 failures use `application/xml` with `Code`, `Message`, and `Resource`, for ex
 </Error>
 ```
 
-Common S3 codes include `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `RequestTimeTooSkewed`, `InvalidToken`, `InvalidArgument`, `InvalidBucketName`, `NoSuchBucket`, `NoSuchKey`, `BucketAlreadyOwnedByYou`, `BadDigest`, and `NotImplemented`. HEAD responses do not carry error bodies; use their status code. Neither API returns a JSON error envelope.
+Common S3 codes include `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `RequestTimeTooSkewed`, `InvalidToken`, `InvalidArgument`, `InvalidBucketName`, `NoSuchBucket`, `NoSuchKey`, `BucketAlreadyOwnedByYou`, `Conflict`, `BadDigest`, `SlowDown`, `ServiceUnavailable`, and `NotImplemented`. Object-content conflicts return `409 Conflict`; this is separate from bucket-creation conflicts. HEAD responses do not carry error bodies; use their status code. Neither API returns a JSON error envelope.

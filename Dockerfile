@@ -8,6 +8,7 @@ RUN go mod download
 
 COPY config/ config/
 COPY bucket/ bucket/
+COPY archive/ archive/
 COPY autoclean/ autoclean/
 COPY prometheus/ prometheus/
 COPY *.go ./
@@ -15,7 +16,7 @@ COPY s3/ s3/
 COPY gui/ gui/
 COPY shared/ shared/
 COPY static/ static/
-RUN CGO_ENABLED=0 go test ./...
+RUN CGO_ENABLED=0 go test -tags=integration ./...
 RUN CGO_ENABLED=0 go build -o /main
 RUN chmod 777 /main
 

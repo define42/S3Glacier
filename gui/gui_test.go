@@ -2,7 +2,9 @@ package gui
 
 import (
 	"archive/tar"
+	"crypto/sha256"
 	"encoding/json"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/config"
 	"glacier/shared"
@@ -11,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -109,6 +113,9 @@ func TestFileViewEscapesMetadataAndPreservesReadToken(t *testing.T) {
 	if strings.Contains(body, "<script>") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("archive filename was not escaped: %s", body)
 	}
+	if strings.Contains(body, archive.ManifestName) {
+		t.Fatalf("archive page exposes its internal manifest: %s", body)
+	}
 	if !strings.Contains(body, "/buckets/logs/get/20261107-1036-40f1-b34f-02d7517a01d3?token=read-secret") {
 		t.Fatalf("archive link lost bucket or token: %s", body)
 	}
@@ -160,6 +167,65 @@ func TestUUIDUsesSelectedBucket(t *testing.T) {
 	}
 }
 
+func TestFileViewHidesCheckpoints(t *testing.T) {
+	store, data := testStore(t)
+	writeGUIArchive(t, data.Path, "2026/11/07/10/0000.tar", "data")
+	view := FileView(store)
+	request := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/files/2026/11/07/10/", nil), map[string]string{"path": "2026/11/07/10"})
+	response := httptest.NewRecorder()
+	view.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "0000.tar") || strings.Contains(response.Body.String(), "0000.commit") {
+		t.Fatalf("archive directory exposes checkpoint metadata: %d %s", response.Code, response.Body)
+	}
+	request = mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/files/2026/11/07/10/0000.commit", nil), map[string]string{"path": "2026/11/07/10/0000.commit"})
+	response = httptest.NewRecorder()
+	view.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("checkpoint direct access status = %d", response.Code)
+	}
+}
+
+func TestFileViewHoldsArchiveLockUntilResponseCompletes(t *testing.T) {
+	store, data := testStore(t)
+	writeGUIArchive(t, data.Path, "2026/11/07/10/0000.tar", "data")
+	archivePath := filepath.Join(data.Path, "2026", "11", "07", "10", "0000.tar")
+	request := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/files/2026/11/07/10/0000.tar?download=1", nil), map[string]string{"path": "2026/11/07/10/0000.tar"})
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	writer := &blockingBrowseWriter{ResponseRecorder: httptest.NewRecorder(), started: started, release: release}
+	go func() { FileView(store).ServeHTTP(writer, request); close(done) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("archive download did not start")
+	}
+	if removed, err := archive.Default.TryDelete(t.Context(), archivePath); err != nil || removed {
+		t.Fatalf("cleanup deleted an archive being downloaded: removed=%v, error=%v", removed, err)
+	}
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("archive download did not finish")
+	}
+	if removed, err := archive.Default.TryDelete(t.Context(), archivePath); err != nil || !removed {
+		t.Fatalf("archive lock was not released: removed=%v, error=%v", removed, err)
+	}
+}
+
+type blockingBrowseWriter struct {
+	*httptest.ResponseRecorder
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingBrowseWriter) Write(data []byte) (int, error) {
+	w.once.Do(func() { close(w.started); <-w.release })
+	return w.ResponseRecorder.Write(data)
+}
+
 func TestRedirectPreservesBucketAndToken(t *testing.T) {
 	testStore(t)
 	t.Setenv(config.READ_TOKEN, "read-secret")
@@ -191,24 +257,9 @@ func testStore(t *testing.T) (*bucket.Store, bucket.Bucket) {
 func writeGUIArchive(t *testing.T, root, relative, filename string) {
 	t.Helper()
 	name := filepath.Join(root, filepath.FromSlash(relative))
-	if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
-		t.Fatal(err)
-	}
-	file, err := os.Create(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := tar.NewWriter(file)
-	if err := writer.WriteHeader(&tar.Header{Name: "20261107-1036-40f1-b34f-02d7517a01d3", Size: 4, Uname: filename, Gname: "text/plain", Format: tar.FormatPAX}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("test")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
+	payload := []byte("test")
+	header := &tar.Header{Name: "20261107-1036-40f1-b34f-02d7517a01d3", Size: int64(len(payload)), Uname: filename, Gname: "text/plain", Format: tar.FormatPAX}
+	if _, err := archive.Default.Append(t.Context(), name, header, payload, sha256.Sum256(payload)); err != nil {
 		t.Fatal(err)
 	}
 }

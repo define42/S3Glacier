@@ -1,7 +1,10 @@
 package autoclean
 
 import (
+	"archive/tar"
+	"crypto/sha256"
 	"errors"
+	"glacier/archive"
 	"glacier/prometheus"
 	"math"
 	"os"
@@ -10,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofrs/flock"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -104,7 +106,7 @@ func TestRemoveArchiveDoesNotRecreateMissingFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.tar")
 	removed, err := removeArchive(path)
-	if removed || !os.IsNotExist(err) {
+	if removed || err != nil {
 		t.Fatalf("removeArchive(missing) = %v, %v", removed, err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -148,12 +150,11 @@ func TestCleanupArchivesSkipsBusyLock(t *testing.T) {
 	root := t.TempDir()
 	busy := writeTestFile(t, root, "buckets/data/2026/11/05/10/0000.tar")
 	available := writeTestFile(t, root, "buckets/logs/2026/11/06/10/00.tar")
-	lock := flock.New(busy, flock.SetFlag(os.O_RDWR))
-	locked, err := lock.TryLock()
-	if err != nil || !locked {
-		t.Fatalf("cannot acquire test lock: locked = %v, error = %v", locked, err)
+	reader, err := archive.Default.Open(t.Context(), busy)
+	if err != nil {
+		t.Fatalf("cannot open busy archive: %v", err)
 	}
-	t.Cleanup(func() { lock.Close() })
+	t.Cleanup(func() { reader.Close() })
 	candidates, err := collectArchives(root)
 	if err != nil {
 		t.Fatal(err)
@@ -224,9 +225,80 @@ func TestRunCleanupUpdatesGlobalWindowAndPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestCleanupReapsOrphansWithoutDiskPressure(t *testing.T) {
+	root := t.TempDir()
+	orphan := writeTestFile(t, root, "buckets/data/2026/11/01/10/0000.tar")
+	if err := os.Remove(orphan); err != nil {
+		t.Fatal(err)
+	}
+	data := writeTestFile(t, root, "buckets/logs/2026/11/07/10/0000.tar")
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	if err := runCleanup(root, 75, func() (float64, error) { return 70, nil }, now); err != nil {
+		t.Fatal(err)
+	}
+	assertDataWindow(t, 2)
+	if _, err := os.Stat(archive.CommitPath(orphan)); !os.IsNotExist(err) {
+		t.Fatalf("orphan checkpoint was not reaped: %v", err)
+	}
+	if _, err := os.Stat(data); err != nil {
+		t.Fatalf("healthy archive was removed below threshold: %v", err)
+	}
+}
+
+func TestCleanupReapsTemporaryCheckpointWithoutArchive(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	temporary := writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-interrupted")
+	candidates, err := collectArchives(root)
+	if err != nil || len(candidates) != 1 || candidates[0].hasData {
+		t.Fatalf("temporary checkpoint candidates = %v, error = %v", candidates, err)
+	}
+	checks := 0
+	retained, err := cleanupArchives(candidates, 75, func() (float64, error) {
+		checks++
+		return 70, nil
+	})
+	if err != nil || len(retained) != 0 || checks != 0 {
+		t.Fatalf("orphan cleanup retained=%v, error=%v, disk checks=%d", retained, err, checks)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatalf("temporary checkpoint was not reaped: %v", err)
+	}
+}
+
+func TestCleanupOrphanScanDoesNotDeleteRecreatedArchive(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := collectArchives(root)
+	if err != nil || len(candidates) != 1 || candidates[0].hasData {
+		t.Fatalf("orphan candidates = %v, error = %v", candidates, err)
+	}
+	writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar")
+	if _, err := cleanupArchives(candidates, 75, func() (float64, error) { return 70, nil }); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := archive.Default.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("recreated archive was deleted: %v", err)
+	}
+	reader.Close()
+}
+
 func writeTestFile(t *testing.T, root, relative string) string {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(relative))
+	if filepath.Ext(path) == ".tar" {
+		payload := []byte("archive")
+		header := &tar.Header{Name: "20261107-1036-40f1-b34f-02d7517a01d3", Size: int64(len(payload)), Gname: "text/plain"}
+		if _, err := archive.Default.Append(t.Context(), path, header, payload, sha256.Sum256(payload)); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}

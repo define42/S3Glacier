@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/config"
 	"glacier/prometheus"
@@ -21,7 +22,6 @@ import (
 	"time"
 
 	"github.com/gabriel-vasile/mimetype"
-	"github.com/gofrs/flock"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/linkedin/goavro"
@@ -156,9 +156,10 @@ func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
 // bucket access. The object ID comes from the mux "id" variable. HEAD returns
 // object headers; ?parse=avro requests an Avro-to-JSON view.
 //
-// Readers share an archive lock, with acquisition controlled by r.Context().
-// Missing objects return 404 without creating files, invalid IDs return 400,
-// and archive or decoding failures return 500 when headers are not yet written.
+// Reads use the archive manager's committed view and shared lock, with
+// acquisition controlled by r.Context(). Missing objects return 404, invalid IDs
+// return 400, busy or quarantined archives return 503, and corruption or decoding
+// failures return 500 when headers are not yet written.
 func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	id := mux.Vars(r)["id"]
 	parse := r.URL.Query().Get("parse")
@@ -167,29 +168,19 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	fileLock := flock.New(containerFile, flock.SetFlag(os.O_RDONLY))
-	defer fileLock.Close()
-	locked, err := fileLock.TryRLockContext(r.Context(), 50*time.Millisecond)
+	tarFile, err := archive.Default.Open(r.Context(), containerFile)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
 			http.NotFound(w, r)
-			return
+		case errors.Is(err, archive.ErrBusy):
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "Archive is busy; try again", http.StatusServiceUnavailable)
+		case errors.Is(err, archive.ErrUnavailable):
+			http.Error(w, "Archive is unavailable", http.StatusServiceUnavailable)
+		default:
+			http.Error(w, "Unable to open archive", http.StatusInternalServerError)
 		}
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintln(w, err)
-		fmt.Println("lock timeout:", err)
-		return
-	}
-	if !locked {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Println("file not locked:")
-		return
-	}
-	defer fileLock.Unlock()
-	tarFile, err := os.Open(containerFile)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintln(w, "open tar file failed", err)
 		return
 	}
 	defer tarFile.Close()
@@ -206,6 +197,9 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintln(w, "open tar file failed", err)
 			return
+		}
+		if archive.IsInternalEntry(hdr) {
+			continue
 		}
 		if id == hdr.Name {
 			if len(hdr.Gname) > 0 {
@@ -267,24 +261,14 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	}
 }
 
-// UploadToBucket appends a complete, in-memory object after the caller authorizes
-// bucket access. It returns the extracted UUID and archive path, or an ID,
-// compression, lock, or filesystem error. A non-nil request supplies the context
-// used while acquiring the archive's exclusive append lock.
-//
-// Duplicate IDs are appended without rejection; GetBucketFile still returns
-// the first matching entry, so this function does not overwrite existing objects.
+// UploadToBucket commits a complete, in-memory object after the caller authorizes
+// bucket access. It returns the normalized UUID and archive path. Retrying an
+// existing UUID with identical original bytes succeeds without another append;
+// different bytes return archive.ErrConflict. The request context controls lock
+// acquisition, and archive errors propagate to the HTTP/S3 caller.
 // Compression may allocate another full buffer in addition to fileBytes.
 func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byte) (string, string, error) {
 	containerFile, uuid_id, err := GetBucketContainerFile(b, id)
-	if err != nil {
-		fmt.Println(err)
-		return "", "", err
-	}
-	containerPath := filepath.Dir(containerFile)
-
-	err = os.MkdirAll(containerPath, 0700)
-
 	if err != nil {
 		fmt.Println(err)
 		return "", "", err
@@ -315,84 +299,26 @@ func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byt
 		}
 	}
 
-	fileLock := flock.New(containerFile)
-	defer fileLock.Close()
-	locked, err := fileLock.TryLockContext(r.Context(), 50*time.Millisecond)
-	if err != nil {
-		fmt.Println("lock timeout:", err)
-		return "", "", err
+	storedPayload := fileBytes
+	header := &tar.Header{
+		Name: uuid_id, Size: int64(len(fileBytes)), Format: tar.FormatPAX,
+		Uname: id, PAXRecords: make(map[string]string), Gname: mtype.String(),
 	}
-	if !locked {
-		fmt.Println("file not locked:")
-		return "", "", errors.New("archive lock was not acquired")
+	if doCompress {
+		storedPayload = output.Bytes()
+		header.Size = int64(len(storedPayload))
+		header.Uid = len(fileBytes)
+		header.Mode = 1
 	}
-	defer fileLock.Unlock()
-
 	prometheus.Tar_files_open.Inc()
 	defer prometheus.Tar_files_open.Dec()
-
-	f, err := os.OpenFile(containerFile, os.O_RDWR|os.O_CREATE, os.ModePerm)
+	appended, err := archive.Default.Append(r.Context(), containerFile, header, storedPayload, sha256.Sum256(fileBytes))
 	if err != nil {
 		return "", "", err
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return "", "", err
+	if appended {
+		prometheus.RawUploadDoneProcessed.Inc()
 	}
-	if fi.Size() > 0 {
-		if _, err = f.Seek(-2<<9, io.SeekEnd); err != nil {
-			return "", "", err
-		}
-	}
-
-	tw := tar.NewWriter(f)
-
-	metadata := make(map[string]string)
-
-	//metadata["test"] = "test"
-	if !doCompress {
-		hdr := &tar.Header{
-			Name:       uuid_id,
-			Size:       int64(len(fileBytes)),
-			Format:     tar.FormatPAX,
-			Uname:      id,
-			PAXRecords: metadata,
-			Gname:      mtype.String(),
-		}
-
-		if err := tw.WriteHeader(hdr); err != nil {
-			return "", "", err
-		}
-
-		if _, err := tw.Write(fileBytes); err != nil {
-			return "", "", err
-		}
-	} else {
-		hdr := &tar.Header{
-			Name:       uuid_id,
-			Size:       int64(output.Len()),
-			Uid:        int(len(fileBytes)),
-			Format:     tar.FormatPAX,
-			Uname:      id,
-			Gname:      mtype.String(),
-			PAXRecords: metadata,
-			Mode:       1, //Define we use compression
-		}
-
-		if err := tw.WriteHeader(hdr); err != nil {
-			return "", "", err
-		}
-		if _, err := io.Copy(tw, &output); err != nil {
-			return "", "", err
-		}
-	}
-
-	if err := tw.Close(); err != nil {
-		return "", "", err
-	}
-	prometheus.RawUploadDoneProcessed.Inc()
-	//	fmt.Fprintf(w, "<html><a href=get/%v>%v</a> <br><a href=%v>%v</a>", id, id, containerFile, containerFile)
 	return uuid_id, containerFile, nil
 }
 

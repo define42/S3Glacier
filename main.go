@@ -107,6 +107,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	owner, err := acquireDataRoot(config.Settings.Get(config.DATA_FOLDER))
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Keep ownership until process exit, when all background workers stop too.
+	// log.Fatal deliberately exits without releasing this guard beforehand.
+	defer owner.Close()
 	go autoclean.AutoClean()
 	go prometheus.SystemStat()
 

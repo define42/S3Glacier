@@ -3,7 +3,9 @@ package autoclean
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"glacier/archive"
 	"glacier/config"
 	"glacier/prometheus"
 	"io/fs"
@@ -15,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/shirou/gopsutil/disk"
 )
 
@@ -37,8 +38,9 @@ func getDiskUsageAllowed() float64 {
 var DiskUsageAllowed = getDiskUsageAllowed()
 
 type archiveCandidate struct {
-	path string
-	hour time.Time
+	path    string
+	hour    time.Time
+	hasData bool
 }
 
 // archiveHour accepts only the bucket archive layout.
@@ -62,7 +64,7 @@ func archiveHour(relative string) (time.Time, bool) {
 }
 
 func collectArchives(root string) ([]archiveCandidate, error) {
-	var candidates []archiveCandidate
+	byPath := make(map[string]archiveCandidate)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -78,15 +80,34 @@ func collectArchives(root string) ([]archiveCandidate, error) {
 			}
 			return nil
 		}
-		hour, ok := archiveHour(relative)
-		if !ok || !entry.Type().IsRegular() {
+		if !entry.Type().IsRegular() {
 			return nil
 		}
-		candidates = append(candidates, archiveCandidate{path: path, hour: hour})
+		archivePath, metadata := archive.MetadataArchive(path)
+		if metadata {
+			relative, err = filepath.Rel(root, archivePath)
+			if err != nil {
+				return err
+			}
+		} else {
+			archivePath = path
+		}
+		hour, ok := archiveHour(relative)
+		if !ok {
+			return nil
+		}
+		candidate := byPath[archivePath]
+		candidate.path, candidate.hour = archivePath, hour
+		candidate.hasData = candidate.hasData || !metadata
+		byPath[archivePath] = candidate
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	candidates := make([]archiveCandidate, 0, len(byPath))
+	for _, candidate := range byPath {
+		candidates = append(candidates, candidate)
 	}
 	// Bucket names must not affect retention: evict the oldest hour across all
 	// buckets, using the full path only to make ties deterministic.
@@ -100,34 +121,51 @@ func collectArchives(root string) ([]archiveCandidate, error) {
 }
 
 func removeArchive(path string) (bool, error) {
-	// Do not create a file if another cleanup pass removed it after the scan.
-	fileLock := flock.New(path, flock.SetFlag(os.O_RDWR))
-	defer fileLock.Close()
-	locked, err := fileLock.TryLock()
-	if err != nil || !locked {
-		return false, err
-	}
-	if err := os.Remove(path); err != nil {
-		return false, err
-	}
-	return true, nil
+	return archive.Default.TryDelete(context.Background(), path)
 }
 
 func cleanupArchives(candidates []archiveCandidate, allowed float64, diskUsage func() (float64, error)) ([]archiveCandidate, error) {
 	retained := make([]archiveCandidate, 0, len(candidates))
-	for i, candidate := range candidates {
+	var measurementErr error
+	stopEvicting := false
+	for _, candidate := range candidates {
+		if !candidate.hasData {
+			// Recheck absence under the archive key lock. A new writer may have
+			// recreated this path after collection; it must not be evicted here.
+			reaped, err := archive.Default.TryReapOrphan(context.Background(), candidate.path)
+			if err != nil && !errors.Is(err, archive.ErrBusy) {
+				fmt.Printf("Checkpoint cleanup skipped %q: %v\n", archive.CommitPath(candidate.path), err)
+			}
+			if !reaped {
+				retained = append(retained, candidate)
+			}
+			continue
+		}
+		if stopEvicting {
+			retained = append(retained, candidate)
+			continue
+		}
 		used, err := diskUsage()
 		if err != nil {
 			// Without a fresh measurement, leave every remaining archive intact.
-			return append(retained, candidates[i:]...), err
+			measurementErr, stopEvicting = err, true
+			retained = append(retained, candidate)
+			continue
 		}
 		if math.IsNaN(used) || math.IsInf(used, 0) || used < 0 || used > 100 {
-			return append(retained, candidates[i:]...), fmt.Errorf("invalid disk usage: %v", used)
+			measurementErr, stopEvicting = fmt.Errorf("invalid disk usage: %v", used), true
+			retained = append(retained, candidate)
+			continue
 		}
 		if used <= allowed {
-			return append(retained, candidates[i:]...), nil
+			stopEvicting = true
+			retained = append(retained, candidate)
+			continue
 		}
 		removed, err := removeArchive(candidate.path)
+		if errors.Is(err, archive.ErrBusy) {
+			err = nil
+		}
 		if err != nil {
 			fmt.Printf("Cleanup skipped %q: %v\n", candidate.path, err)
 		}
@@ -137,18 +175,17 @@ func cleanupArchives(candidates []archiveCandidate, allowed float64, diskUsage f
 			retained = append(retained, candidate)
 		}
 	}
-	return retained, nil
+	return retained, measurementErr
 }
 
 func dataWindowHours(candidates []archiveCandidate, now time.Time) float64 {
-	if len(candidates) == 0 {
-		return 0
+	for _, candidate := range candidates {
+		if !candidate.hasData {
+			continue
+		}
+		return max(0, now.Sub(candidate.hour).Hours())
 	}
-	hours := now.Sub(candidates[0].hour).Hours()
-	if hours < 0 {
-		return 0
-	}
-	return hours
+	return 0
 }
 
 func runCleanup(root string, allowed float64, diskUsage func() (float64, error), now time.Time) error {
@@ -163,8 +200,10 @@ func runCleanup(root string, allowed float64, diskUsage func() (float64, error),
 
 // AutoClean runs disk-pressure cleanup until the process exits. Each pass scans
 // all buckets and removes the oldest unlocked archives until fresh disk usage
-// is at or below DiskUsageAllowed. Busy archives are skipped, errors are logged,
-// and the next pass starts after a ten-second pause. Call it in a goroutine.
+// is at or below DiskUsageAllowed. Orphan checkpoints are reaped independently
+// of disk pressure and do not affect the data-window metric. Busy archives are
+// skipped, errors are logged, and the next pass starts after a ten-second pause.
+// Call it in a goroutine.
 func AutoClean() {
 	fmt.Println("AutoClean start")
 	for {

@@ -1,21 +1,28 @@
 package shared_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"errors"
 	"fmt"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/config"
+	"glacier/prometheus"
 	"glacier/shared"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
+	dto "github.com/prometheus/client_model/go"
 )
 
 const (
@@ -199,13 +206,24 @@ func TestUploadToBucketUsesAtMostConfiguredTarFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) == 0 || len(entries) > 4 {
-		t.Fatalf("created %d TAR files in one hour, want 1-4", len(entries))
-	}
+	archives := 0
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".tar" {
+		if entry.IsDir() {
+			t.Fatalf("unexpected archive directory: %s", entry.Name())
+		}
+		switch filepath.Ext(entry.Name()) {
+		case ".tar":
+			archives++
+			if _, err := os.Stat(archive.CommitPath(filepath.Join(b.Path, "2026", "11", "07", "10", entry.Name()))); err != nil {
+				t.Fatalf("archive lacks checkpoint: %s: %v", entry.Name(), err)
+			}
+		case ".commit":
+		default:
 			t.Fatalf("unexpected archive entry: %s", entry.Name())
 		}
+	}
+	if archives == 0 || archives > 4 {
+		t.Fatalf("created %d TAR files in one hour, want 1-4", archives)
 	}
 	for _, i := range []int{0, 63, 127} {
 		id := fmt.Sprintf("20261107-1036-4000-8000-%012x", i)
@@ -277,4 +295,201 @@ func getObject(b bucket.Bucket, id string) *httptest.ResponseRecorder {
 	out := httptest.NewRecorder()
 	shared.GetBucketFile(out, request, b)
 	return out
+}
+
+func TestUploadToBucketIdempotentRetries(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "uncompressed", payload: []byte("original content")},
+		{name: "compressed", payload: bytes.Repeat([]byte("compressible original content\n"), 40)},
+		{name: "empty", payload: []byte{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := configureStorage(t)
+			b, err := openBuckets(t, root).Get("data")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeCounter := completedUploadCount(t)
+			path := uploadObject(t, b, v4ID, tc.payload)
+			beforeFiles := archiveState(t, path)
+			previousStore := archive.Default
+			archive.Default = archive.NewStore()
+			t.Cleanup(func() { archive.Default = previousStore })
+			request := httptest.NewRequest(http.MethodPut, "/data/retry", bytes.NewReader(tc.payload))
+			id, gotPath, err := shared.UploadToBucket(request, b, "retry-"+v4ID+".txt", tc.payload)
+			if err != nil || id != v4ID || gotPath != path {
+				t.Fatalf("retry: id=%q path=%q err=%v", id, gotPath, err)
+			}
+			if got := archiveState(t, path); !maps.Equal(got, beforeFiles) {
+				t.Fatal("identical retry changed archive or checkpoint")
+			}
+			conflict := append(bytes.Clone(tc.payload), []byte("different")...)
+			request = httptest.NewRequest(http.MethodPut, "/data/conflict", bytes.NewReader(conflict))
+			if _, _, err := shared.UploadToBucket(request, b, v4ID, conflict); !errors.Is(err, archive.ErrConflict) {
+				t.Fatalf("different content error=%v, want ErrConflict", err)
+			}
+			if got := archiveState(t, path); !maps.Equal(got, beforeFiles) {
+				t.Fatal("conflicting retry changed archive or checkpoint")
+			}
+			out := getObject(b, v4ID)
+			if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), tc.payload) {
+				t.Fatalf("original object changed: %d %q", out.Code, out.Body.Bytes())
+			}
+			if got := completedUploadCount(t) - beforeCounter; got != 1 {
+				t.Fatalf("completed uploads increased by %v, want 1", got)
+			}
+		})
+	}
+}
+
+func TestUploadToBucketConcurrentIdenticalRetries(t *testing.T) {
+	root := configureStorage(t)
+	b, err := openBuckets(t, root).Get("data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("same concurrent content\n"), 40)
+	beforeCounter := completedUploadCount(t)
+	start := make(chan struct{})
+	results := make(chan error, 8)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			<-start
+			request := httptest.NewRequest(http.MethodPut, "/data/concurrent", bytes.NewReader(payload))
+			_, _, err := shared.UploadToBucket(request, b, v4ID, payload)
+			results <- err
+		})
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent retry failed: %v", err)
+		}
+	}
+	if got := completedUploadCount(t) - beforeCounter; got != 1 {
+		t.Fatalf("completed uploads increased by %v, want 1", got)
+	}
+	path, _, err := shared.GetBucketContainerFile(b, v4ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := archive.Default.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	tr := tar.NewReader(reader)
+	objects := 0
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !archive.IsInternalEntry(header) {
+			objects++
+		}
+	}
+	if objects != 1 {
+		t.Fatalf("concurrent retries stored %d object entries, want 1", objects)
+	}
+}
+
+type archiveFileState struct {
+	contents string
+	modified int64
+}
+
+func archiveState(t *testing.T, path string) map[string]archiveFileState {
+	t.Helper()
+	state := make(map[string]archiveFileState)
+	for _, name := range []string{path, archive.CommitPath(path)} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state[name] = archiveFileState{contents: string(data), modified: info.ModTime().UnixNano()}
+	}
+	return state
+}
+
+func completedUploadCount(t *testing.T) float64 {
+	t.Helper()
+	var metric dto.Metric
+	if err := prometheus.RawUploadDoneProcessed.Write(&metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetCounter().GetValue()
+}
+
+func TestGetBucketFileRejectsArchiveWithoutCheckpoint(t *testing.T) {
+	root := configureStorage(t)
+	b, err := openBuckets(t, root).Get("data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _, err := shared.GetBucketContainerFile(b, v4ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A standalone empty TAR is deliberately missing the required identity and checkpoint.
+	unmanaged := make([]byte, 1024)
+	if err := os.WriteFile(path, unmanaged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := getObject(b, v4ID)
+	if out.Code != http.StatusInternalServerError {
+		t.Fatalf("unmanaged archive returned %d: %s", out.Code, out.Body.String())
+	}
+	if _, err := os.Stat(archive.CommitPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read created checkpoint for unmanaged archive: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, unmanaged) {
+		t.Fatalf("read modified unmanaged archive: %v", err)
+	}
+}
+
+func TestUploadToBucketInvalidFilenameDoesNotQuarantine(t *testing.T) {
+	root := configureStorage(t)
+	b, err := openBuckets(t, root).Create("one-shard", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("original object")
+	path := uploadObject(t, b, v4ID, payload)
+	before := archiveState(t, path)
+	newID := "20261107-1036-40f1-b34f-02d7517a01d4"
+	request := httptest.NewRequest(http.MethodPut, "/one-shard/invalid", bytes.NewReader(payload))
+	if _, _, err := shared.UploadToBucket(request, b, "invalid\x00"+newID, payload); !errors.Is(err, archive.ErrInvalidEntry) {
+		t.Fatalf("invalid metadata error=%v, want ErrInvalidEntry", err)
+	}
+	if !maps.Equal(archiveState(t, path), before) {
+		t.Fatal("invalid metadata changed the committed archive or checkpoint")
+	}
+	out := getObject(b, v4ID)
+	if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), payload) {
+		t.Fatalf("invalid metadata quarantined old data: %d %q", out.Code, out.Body.Bytes())
+	}
+	uploadObject(t, b, newID, []byte("valid new object"))
+	out = getObject(b, newID)
+	if out.Code != http.StatusOK || out.Body.String() != "valid new object" {
+		t.Fatalf("valid append after invalid metadata failed: %d %q", out.Code, out.Body.Bytes())
+	}
 }

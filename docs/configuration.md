@@ -17,7 +17,7 @@ to standard output. Treat these logs as sensitive and restrict access to them.
 
 | Variable | Default when unset | Meaning and empty-value behavior |
 | --- | --- | --- |
-| `DATA_FOLDER` | `/files` | Root for persisted bucket definitions and object archives. It must be writable; missing directories are created. An empty value causes startup to fail. Relative paths are resolved against the process's working directory. |
+| `DATA_FOLDER` | `/files` | Root for persisted bucket definitions, TAR archives, and their `.commit` checkpoints. It must be writable and owned by one serving process; missing directories are created. An empty value causes startup to fail. Relative paths are resolved against the process's working directory. |
 | `SERVER_PORT` | `8000` | Plain HTTP listen port on all interfaces. Used when ACME mode is inactive. An empty value does not restore `8000`: the application passes the bind address `:` to the HTTP server. Use an explicit port. |
 | `DISK_USAGE_ALLOWED` | `75` | Maximum target usage percentage for the filesystem containing `DATA_FOLDER`, shared by all buckets. Accepts a finite number from `5` through `99`, inclusive. Empty, unparseable, or out-of-range values use `75`. |
 | `EXTEND_LIFE_SUPPORT` | `false` | Only the exact string `true` enables UUIDv4 month-offset interpretation. Empty and all other strings leave it disabled. See [extended retention](#extended-retention). |
@@ -105,22 +105,62 @@ Persist the entire `DATA_FOLDER`, including hidden files:
 
 ```text
 DATA_FOLDER/
+  .server.lock                      # Held for the standalone process lifetime
   .buckets/                         # Immutable definitions and configuration lock
   buckets/data/YYYY/MM/DD/HH/0000.tar
+  buckets/data/YYYY/MM/DD/HH/0000.commit
   buckets/example/YYYY/MM/DD/HH/0000.tar
+  buckets/example/YYYY/MM/DD/HH/0000.commit
 ```
 
 Every bucket, including `data`, uses this layout. Definitions record each
 bucket's fixed TAR files per hour; editing or removing them can prevent startup
-or make object paths inconsistent. Archive files are created on demand. Back up
-both the definitions and the archive tree.
+or make object paths inconsistent. Archive files are created on demand. Each TAR
+contains an internal identity manifest and has a matching `.commit` file recording
+its durable committed boundary. The fixed count applies to TAR files; checkpoints
+add one persistent file per TAR, plus transient checkpoint-publication files.
+Back up the definitions, archive tree, and checkpoints as a consistent snapshot,
+or stop writes before copying them.
+
+Only one server process may serve a `DATA_FOLDER`; the standalone server holds
+one lifetime `.server.lock` and refuses a second process using that root. This
+ownership guard is separate from archive synchronization and does not add lock
+files to each archive. The archive lock registry is
+in memory and keyed by the full bucket/hour/shard path; different hours do not
+share a lock, and other processes do not participate in these locks. Idle lock
+entries are released after their holders and waiters finish. Existing TARs without
+the checkpoint/manifest format are rejected; there is no automatic adoption or
+migration of older archives.
+
+Before an upload is acknowledged, the server syncs the TAR, writes and syncs a
+new checkpoint, atomically publishes it, and syncs its directory. Reads and
+identical retries confirm directory durability before exposing existing state,
+including after a process restart. Recovery runs
+under the exclusive archive lock and restores the committed boundary and footer
+before serving the archive. If a storage write or sync fails, that archive is
+quarantined for reads and appends. Restarting alone is insufficient after an
+actual I/O or sync failure: repair the storage and verify or recover its durable
+filesystem state before restarting the server. Pressure cleanup may still
+durably remove a quarantined archive and its
+checkpoint, allowing a later write to create a fresh generation.
+
+The supported storage target is a local filesystem that honors file and directory
+sync, atomic rename, and power-safe overwrite semantics. Checkpoints establish
+crash-consistent visibility, not replication or protection against arbitrary media
+corruption. Network-shared data roots and multiple serving processes are unsupported.
+External mutation of the managed archive tree and access through aliases are unsupported.
 
 `DISK_USAGE_ALLOWED` measures **the whole filesystem** containing `DATA_FOLDER`,
 not just this server's archive bytes. Cleanup runs once at startup and then about
 every ten seconds. When usage exceeds the threshold, it removes eligible TAR
 archives by resolved folder hour across all buckets and rechecks usage before
-each deletion. Archives with busy locks are skipped. Bucket definitions remain
-in place, so an emptied bucket retains its original configuration.
+each deletion. Archives with busy locks are skipped. Deletion syncs removal of
+the TAR before removing its checkpoint, without allocating a deletion marker.
+Orphan checkpoints do not count toward the data-window metric and are reaped
+with interrupted checkpoint temporary files, without recreating their missing
+TARs. This metadata cleanup also runs below the disk-pressure threshold. Bucket
+definitions remain in place, so an
+emptied bucket retains its original configuration.
 
 This is pressure-based eviction with no guaranteed minimum retention period.
 Unrelated data on the same filesystem can trigger eviction, and the cleanup loop
@@ -192,16 +232,18 @@ The service exposes Prometheus metrics at `/metrics`:
 | Metric | Meaning |
 | --- | --- |
 | `rawupload_processed_total` | Upload attempts admitted by HTTP/S3 handlers; multipart requests count per file. |
-| `rawupload_processed_total_done` | Entries successfully written by the archive writer. |
+| `rawupload_processed_total_done` | New durably committed objects; identical successful retries do not increment this counter. |
 | `disk_free` | Free bytes on the filesystem containing `DATA_FOLDER`. |
 | `disk_used_percent` | Used percentage on that filesystem. |
-| `tar_files_open` | Active archive write sections; excludes archive readers. |
+| `tar_files_open` | Active archive append calls, including lock waits and recovery; excludes readers and compression. |
 | `current_data_window_in_hours` | Age of the oldest retained archive folder across buckets; zero for no archives or future-only timestamps. |
 
 Filesystem capacity gauges update about once per second. The retained-window
 gauge updates with cleanup passes. A disk-stat failure leaves the capacity gauges
-at their last recorded values. A successful archive write counter is not a
-filesystem durability or checksum-audit guarantee.
+at their last recorded values. Attempt and completion counters do not directly
+give a failure count, because successful identical retries add no new committed
+object. A successful archive write counter is not a
+guarantee of replication or a checksum audit of all previously stored objects.
 
 Implementation references: [`config/settings.go`](../config/settings.go),
 [`main.go`](../main.go), [`acme.go`](../acme.go),

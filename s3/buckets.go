@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/prometheus"
 	"glacier/shared"
@@ -208,8 +209,20 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 			}
 		}
 		if _, _, err := shared.UploadToBucket(r, b, vars["id"], fileBytes); err != nil {
-			log.Printf("upload S3 object in bucket %q: %v", b.Name, err)
-			writeS3Error(w, r, http.StatusInternalServerError, "InternalError", "Unable to store the object.")
+			switch {
+			case errors.Is(err, archive.ErrInvalidEntry):
+				writeS3Error(w, r, http.StatusBadRequest, "InvalidArgument", "The object metadata cannot be stored in an archive.")
+			case errors.Is(err, archive.ErrConflict):
+				writeS3Error(w, r, http.StatusConflict, "Conflict", "This UUID already identifies different object content.")
+			case errors.Is(err, archive.ErrBusy):
+				w.Header().Set("Retry-After", "1")
+				writeS3Error(w, r, http.StatusServiceUnavailable, "SlowDown", "The archive is busy; try again.")
+			case errors.Is(err, archive.ErrUnavailable):
+				writeS3Error(w, r, http.StatusServiceUnavailable, "ServiceUnavailable", "The archive is unavailable.")
+			default:
+				log.Printf("upload S3 object in bucket %q: %v", b.Name, err)
+				writeS3Error(w, r, http.StatusInternalServerError, "InternalError", "Unable to store the object.")
+			}
 			return
 		}
 		w.Header().Set("ETag", `"`+hex.EncodeToString(hash[:])+`"`)
@@ -273,6 +286,8 @@ func (w *objectResponseWriter) WriteHeader(status int) {
 		code, message = "NoSuchKey", "The object does not exist."
 	case http.StatusForbidden:
 		code, message = "AccessDenied", "Access to the object is denied."
+	case http.StatusServiceUnavailable:
+		code, message = "ServiceUnavailable", "The archive is unavailable."
 	}
 	writeS3Error(w.ResponseWriter, w.request, status, code, message)
 }

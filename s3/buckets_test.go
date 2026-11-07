@@ -3,18 +3,25 @@ package s3
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/config"
+	"glacier/shared"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/minio-go/v7/pkg/signer"
 )
 
 func TestBucketHandler(t *testing.T) {
@@ -324,5 +331,140 @@ func assertErrorCode(t *testing.T, response *httptest.ResponseRecorder, want str
 	}
 	if result.Code != want {
 		t.Errorf("error code = %q, want %q", result.Code, want)
+	}
+}
+
+func TestObjectHandlerIdempotentPUT(t *testing.T) {
+	for _, version := range []string{"v2", "v4"} {
+		t.Run(version, func(t *testing.T) {
+			store := openTestStore(t)
+			router := authenticatedTestRouter(t, store)
+			b, err := store.Get("data")
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := "20261107-1200-4000-8000-0000000000ff"
+			payload := bytes.Repeat([]byte("original S3 content\n"), 30)
+			put := func(body []byte) *httptest.ResponseRecorder {
+				request := httptest.NewRequest("PUT", "/data/"+id, bytes.NewReader(body))
+				if version == "v4" {
+					hash := sha256.Sum256(body)
+					request.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(hash[:]))
+					request = signer.SignV4(*request, "writer", "secret", "", "us-east-1")
+				} else {
+					request = SignV2(*request, "writer", "secret", false)
+				}
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				return response
+			}
+			first := put(payload)
+			if first.Code != http.StatusOK {
+				t.Fatalf("initial PUT: %d %s", first.Code, first.Body.String())
+			}
+			path, _, err := shared.GetBucketContainerFile(b, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotS3Archive(t, path)
+			retry := put(payload)
+			if retry.Code != http.StatusOK || retry.Header().Get("ETag") != first.Header().Get("ETag") {
+				t.Fatalf("identical retry: %d etag=%q first=%q", retry.Code, retry.Header().Get("ETag"), first.Header().Get("ETag"))
+			}
+			if !maps.Equal(snapshotS3Archive(t, path), before) {
+				t.Fatal("identical PUT changed archive or checkpoint")
+			}
+			conflict := put([]byte("different S3 content"))
+			if conflict.Code != http.StatusConflict {
+				t.Fatalf("conflicting PUT: %d %s", conflict.Code, conflict.Body.String())
+			}
+			assertErrorCode(t, conflict, "Conflict")
+			if conflict.Header().Get("ETag") != "" {
+				t.Fatal("conflicting PUT returned a successful ETag")
+			}
+			if !maps.Equal(snapshotS3Archive(t, path), before) {
+				t.Fatal("conflicting PUT changed archive or checkpoint")
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, signedRequest("GET", "/data/"+id, nil, "reader", ""))
+			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), payload) {
+				t.Fatalf("GET after conflict: %d %q", response.Code, response.Body.Bytes())
+			}
+		})
+	}
+}
+
+type s3ArchiveState struct {
+	contents string
+	modified int64
+}
+
+func snapshotS3Archive(t *testing.T, path string) map[string]s3ArchiveState {
+	t.Helper()
+	state := make(map[string]s3ArchiveState)
+	for _, name := range []string{path, archive.CommitPath(path)} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state[name] = s3ArchiveState{contents: string(data), modified: info.ModTime().UnixNano()}
+	}
+	return state
+}
+
+func TestObjectHandlerInvalidMetadataDoesNotQuarantine(t *testing.T) {
+	for _, version := range []string{"v2", "v4"} {
+		t.Run(version, func(t *testing.T) {
+			store := openTestStore(t)
+			b, err := store.Create("one-shard", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			router := authenticatedTestRouter(t, store)
+			id := "20261107-1200-4000-8000-000000000001"
+			newID := "20261107-1200-4000-8000-000000000002"
+			payload := []byte("original object")
+			put := func(name string) *httptest.ResponseRecorder {
+				request := httptest.NewRequest("PUT", "/one-shard/"+url.PathEscape(name), bytes.NewReader(payload))
+				if version == "v4" {
+					request = signer.SignV4(*request, "writer", "secret", "", "us-east-1")
+				} else {
+					request = SignV2(*request, "writer", "secret", false)
+				}
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, request)
+				return response
+			}
+			first := put(id)
+			if first.Code != http.StatusOK {
+				t.Fatalf("initial PUT: %d %s", first.Code, first.Body.String())
+			}
+			path, _, err := shared.GetBucketContainerFile(b, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotS3Archive(t, path)
+			invalid := put("invalid\x00" + newID)
+			if invalid.Code != http.StatusBadRequest {
+				t.Fatalf("invalid metadata: %d %s", invalid.Code, invalid.Body.String())
+			}
+			assertErrorCode(t, invalid, "InvalidArgument")
+			if !maps.Equal(snapshotS3Archive(t, path), before) {
+				t.Fatal("invalid metadata modified archive or checkpoint")
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, signedRequest("GET", "/one-shard/"+id, nil, "reader", ""))
+			if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), payload) {
+				t.Fatalf("old object unavailable: %d %q", response.Code, response.Body.Bytes())
+			}
+			valid := put(newID)
+			if valid.Code != http.StatusOK {
+				t.Fatalf("valid PUT after invalid metadata: %d %s", valid.Code, valid.Body.String())
+			}
+		})
 	}
 }

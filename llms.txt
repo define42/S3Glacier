@@ -19,6 +19,8 @@
 - [main.go](main.go): server construction and route registration; web assets are embedded.
 - [bucket](bucket/store.go): immutable bucket definitions and creation.
 - [shared](shared/shared.go): UUID resolution, archive placement, and object I/O.
+- [archive](archive/store.go): process-local archive locks, durable checkpoints,
+  immutable object retries, recovery, and coordinated eviction.
 - [s3](s3/s3.go): S3 credential registry and V2/V4 authentication dispatch.
 - [autoclean](autoclean/autoclean.go): global disk-pressure archive removal.
 - [config](config/settings.go): environment settings; startup logs include their values.
@@ -26,15 +28,22 @@
 ## Contracts
 
 Every bucket has a fixed maximum TAR count per hour, from 1 to 65,536. The default
-bucket data uses 256. Persist all of DATA_FOLDER, including .buckets metadata.
+bucket data uses 256. Persist all of DATA_FOLDER, including .buckets metadata and
+each TAR's .commit checkpoint. One serving process per data root is required;
+in-memory locks are keyed by full bucket/hour/shard and do not cross hours. One
+lifetime .server.lock enforces standalone-server ownership; use a local filesystem
+with file/directory sync, atomic rename, and power-safe overwrite semantics.
 An object name must contain a supported lowercase UUID v1 or timestamped UUID v4.
-Uploads buffer a complete object in memory. Duplicate UUID uploads append; reads
-return the first matching entry. Per-object overwrite/delete, S3 object listing,
+Uploads buffer a complete object in memory. Identical UUID/content retries are
+idempotent; conflicting bytes return 409. Successful uploads sync the TAR and
+checkpoint before acknowledgment. Recovery hides uncommitted tails; archives
+without the checkpoint/manifest format are not automatically migrated.
+Per-object overwrite/delete, S3 object listing,
 and S3 multipart upload are unsupported. HTTP multipart upload is supported.
 HTTP tokens and S3 signing credentials are separate and server-wide.
 
 ## Development
 
 Use the Go version in go.mod. Run make test and make lint; use
-`go test -race -shuffle=on -count=1 -timeout=5m ./...` for race checks.
+`go test -tags=integration -race -shuffle=on -count=1 -timeout=5m ./...` for race and crash-recovery checks.
 `make modernize` edits code through go fix and requires diff review afterward.

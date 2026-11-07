@@ -187,25 +187,58 @@ timezone when those generated prefixes must represent UTC hours.
 
 ```text
 DATA_FOLDER/
+  .server.lock                 # One lifetime process-ownership lock
   .buckets/
     data.json
     small-files.json
   buckets/data/
     YYYY/MM/DD/HH/0000.tar
+    YYYY/MM/DD/HH/0000.commit    # Durable committed boundary for that TAR
     ...                         # Up to 256 archives in an hour
     YYYY/MM/DD/HH/00ff.tar
   buckets/small-files/
     YYYY/MM/DD/HH/0000.tar
+    YYYY/MM/DD/HH/0000.commit
     ...                         # Up to 4 archives in an hour
     YYYY/MM/DD/HH/0003.tar
 ```
 
 A stable SHA-256 hash of the UUID modulo the saved bucket count selects the TAR
-file. Each archive has a filesystem read/write lock. Object payloads may be
+file. Readers, writers, recovery, and cleanup share an in-memory read/write lock
+for the full bucket/hour/shard path. Different hours use different locks. Run
+only **one server process per data root**; a lifetime `.server.lock` refuses a
+second server process. This one ownership lock does not coordinate archive
+operations, whose locks remain entirely in memory. Object payloads may be
 compressed inside their TAR entries; the HTTP and S3 download handlers restore
 the original bytes.
 
-Persist and back up **all of `DATA_FOLDER`**, including `.buckets` metadata.
+Each TAR has a matching `.commit` checkpoint and an internal identity manifest
+as its first entry.
+Successful uploads sync the TAR, durably publish the checkpoint, and sync its
+directory before acknowledging success. Reads and identical retries also confirm
+the checkpoint's directory entry is durable, including after a process restart.
+After an interrupted append, recovery
+restores the last committed boundary and TAR footer under the exclusive lock;
+readers do not expose the incomplete tail. A storage failure makes that archive
+unavailable for reads and appends until the problem is fixed and the process
+restarts, or cleanup durably removes the archive and its checkpoint. Restarting
+alone is insufficient after an actual I/O or sync failure: repair the underlying
+storage and verify or recover its durable filesystem state before restarting.
+Existing TARs without this checkpoint/manifest format are rejected rather than
+automatically adopted; no format migration is provided.
+
+The configured count limits TAR files, not all filesystem entries: four TARs in
+an hour also have four checkpoint files, plus short-lived files during checkpoint
+publication. Browser listings hide checkpoints and the internal manifest; raw
+TAR downloads retain the manifest.
+
+Persist and back up **all of `DATA_FOLDER`**, including `.buckets` metadata and
+the `.commit` files. Stop writes while taking a filesystem copy, or use a
+filesystem snapshot that keeps each TAR and checkpoint consistent.
+Use a local filesystem with working file/directory sync, atomic rename, and
+power-safe overwrite semantics. This crash-consistency protocol does not provide
+replication or protection against arbitrary storage corruption.
+Do not externally mutate the managed archive tree or access it through aliases.
 Do not edit bucket definitions: changing a count changes where objects resolve.
 Invalid metadata prevents startup. Every bucket, including `data`, uses the
 layout above; the old storage layout is not supported.
@@ -213,6 +246,10 @@ layout above; the old storage layout is not supported.
 Cleanup checks filesystem usage every 10 seconds and removes whole archives in
 oldest-hour order across all buckets until usage is at or below
 `DISK_USAGE_ALLOWED`. Busy archives are skipped, and bucket metadata is retained.
+Cleanup unlinks and syncs the TAR before removing its checkpoint; it does not
+need to allocate a deletion marker when the disk is full. Orphan checkpoints are
+reaped with interrupted checkpoint temporary files without recreating missing
+TAR files, including when there is no disk pressure.
 There are no per-bucket quotas or guaranteed retention periods. The threshold
 measures the filesystem containing `DATA_FOLDER`, not just this application's
 files. [Extended retention](docs/configuration.md#extended-retention) is an
@@ -223,9 +260,10 @@ optional UUID convention, not a retention guarantee.
 - Upload handlers buffer a complete object in memory, including decoded V4
   streaming uploads. Account for payload and compression buffers when choosing
   object sizes and concurrency.
-- Objects are append-only. Reusing a UUID appends another entry rather than
-  replacing it, and downloads return the first matching entry. Duplicate writes
-  are not rejected, so callers must use fresh IDs.
+- Objects are immutable. Retrying the same UUID with identical original bytes
+  succeeds without appending another entry; different bytes return `409 Conflict`.
+  Generate a fresh UUID for a different object. An upload that generates a new
+  UUID on every request does not make those separate requests idempotent.
 - Reads scan the selected TAR sequentially; there is no separate object index.
 - `/metrics` exposes Prometheus counters and gauges without authentication. The
   web landing page and static assets are also public; UUID helpers require the

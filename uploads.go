@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/prometheus"
 	"glacier/shared"
@@ -48,7 +50,7 @@ func rawUpload(store *bucket.Store) http.HandlerFunc {
 		}
 		id, _, err = shared.UploadToBucket(r, b, id, data)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeUploadError(w, err)
 			return
 		}
 		writeUploadResults(w, []uploadResult{{ID: id, Bucket: b.Name, URL: shared.ObjectURL(b.Name, id, "")}})
@@ -99,7 +101,7 @@ func uploadFile(store *bucket.Store) http.HandlerFunc {
 			prometheus.RawUploadProcessed.Inc()
 			id, _, err = shared.UploadToBucket(r, b, id, data)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				writeUploadError(w, err)
 				return
 			}
 			results = append(results, uploadResult{ID: id, Bucket: b.Name, URL: shared.ObjectURL(b.Name, id, r.Form.Get("read_token"))})
@@ -123,4 +125,20 @@ func downloadFile(store *bucket.Store) http.HandlerFunc {
 func writeUploadResults(w http.ResponseWriter, results []uploadResult) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = uploadResults.Execute(w, results)
+}
+
+func writeUploadError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, archive.ErrInvalidEntry):
+		status = http.StatusBadRequest
+	case errors.Is(err, archive.ErrConflict):
+		status = http.StatusConflict
+	case errors.Is(err, archive.ErrBusy):
+		w.Header().Set("Retry-After", "1")
+		status = http.StatusServiceUnavailable
+	case errors.Is(err, archive.ErrUnavailable):
+		status = http.StatusServiceUnavailable
+	}
+	http.Error(w, err.Error(), status)
 }

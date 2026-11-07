@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"glacier/archive"
 	"glacier/bucket"
 	"glacier/shared"
 	"html/template"
@@ -13,11 +15,11 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
@@ -128,9 +130,9 @@ var browseTemplate = template.Must(template.New("browse").Parse(`<!doctype html>
 </main></body></html>`))
 
 // FileView exposes only a bucket's dated archive tree, never its configuration
-// files or another bucket's storage directory.
-// It enforces the HTTP read token, rejects symbolic links, and acquires a shared
-// archive lock before listing entries or serving ?download=1 as a raw TAR file.
+// files or another bucket's storage directory. TAR reads use the shared archive
+// coordinator before opening or stating their data and hold the read lock until
+// the response finishes. Checkpoints and the internal manifest are not listed.
 func FileView(store *bucket.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !shared.AuthorizeRead(w, r) {
@@ -157,9 +159,15 @@ func FileView(store *bucket.Store) http.Handler {
 			return
 		}
 		defer root.Close()
-		// Skip symlinks, including links into another bucket or metadata tree.
+		// These security checks do not open archive data. The archive coordinator
+		// also rejects symlinks under its key lock before opening or recovering.
 		if !regularBrowsePath(root, relative) {
 			http.NotFound(w, r)
+			return
+		}
+		token := shared.RequestToken(r)
+		if path.Ext(relative) == ".tar" {
+			serveArchiveView(w, r, b, relative, token)
 			return
 		}
 		name := relative
@@ -177,86 +185,113 @@ func FileView(store *bucket.Store) http.Handler {
 			http.Error(w, "Unable to read archive path", http.StatusInternalServerError)
 			return
 		}
-		token := shared.RequestToken(r)
-		page := browsePage{Bucket: b, Path: relative}
-		if relative != "" {
-			parent := path.Dir(relative)
-			if parent == "." {
-				parent = ""
-			}
-			page.ParentURL = browseURL(b.Name, parent, token)
+		if !info.IsDir() {
+			http.NotFound(w, r)
+			return
 		}
-		if info.IsDir() {
-			entries, err := file.ReadDir(-1)
-			if err != nil {
-				http.Error(w, "Unable to list archive folder", http.StatusInternalServerError)
-				return
+		entries, err := file.ReadDir(-1)
+		if err != nil {
+			http.Error(w, "Unable to list archive folder", http.StatusInternalServerError)
+			return
+		}
+		page := newBrowsePage(b, relative, token)
+		slices.SortFunc(entries, func(a, b os.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) })
+		for _, entry := range entries {
+			child := path.Join(relative, entry.Name())
+			if !validBrowsePath(child) || entry.Type()&os.ModeSymlink != 0 {
+				continue
 			}
-			slices.SortFunc(entries, func(a, b os.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) })
-			for _, entry := range entries {
-				child := path.Join(relative, entry.Name())
-				if !validBrowsePath(child) || entry.Type()&os.ModeSymlink != 0 {
+			kind := "Folder"
+			if strings.HasSuffix(child, ".tar") {
+				if !entry.Type().IsRegular() {
 					continue
 				}
-				kind := "Folder"
-				if strings.HasSuffix(child, ".tar") {
-					if !entry.Type().IsRegular() {
-						continue
-					}
-					kind = "TAR archive"
-				} else if !entry.IsDir() {
-					continue
-				}
-				page.Entries = append(page.Entries, browseEntry{Name: entry.Name(), URL: browseURL(b.Name, child, token), Kind: kind})
+				kind = "TAR archive"
+			} else if !entry.IsDir() {
+				continue
 			}
-		} else {
-			if !info.Mode().IsRegular() || path.Ext(relative) != ".tar" {
-				http.NotFound(w, r)
-				return
-			}
-			lock := flock.New(file.Name(), flock.SetFlag(os.O_RDONLY))
-			defer lock.Close()
-			locked, err := lock.TryRLock()
-			if err != nil || !locked {
-				w.Header().Set("Retry-After", "1")
-				http.Error(w, "Archive is busy; try again", http.StatusServiceUnavailable)
-				return
-			}
-			if r.URL.Query().Get("download") == "1" {
-				w.Header().Set("Content-Type", "application/x-tar")
-				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(relative)))
-				http.ServeContent(w, r, info.Name(), info.ModTime(), file)
-				return
-			}
-			page.IsArchive = true
-			page.DownloadURL = addQuery(browseURL(b.Name, relative, token), "download", "1")
-			reader := tar.NewReader(file)
-			for {
-				header, err := reader.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					http.Error(w, "Unable to read TAR archive", http.StatusInternalServerError)
-					return
-				}
-				metadata, _ := json.Marshal(header.PAXRecords)
-				row := archiveRow{ID: header.Name, URL: shared.ObjectURL(b.Name, header.Name, token),
-					StoredSize: header.Size, OriginalSize: header.Size, Filename: header.Uname,
-					MimeType: header.Gname, Compressed: header.Mode == 1, Metadata: string(metadata)}
-				if row.Compressed {
-					row.OriginalSize = int64(header.Uid)
-				}
-				if row.MimeType == "application/avro" {
-					row.AvroURL = addQuery(row.URL, "parse", "avro")
-				}
-				page.Rows = append(page.Rows, row)
-			}
+			page.Entries = append(page.Entries, browseEntry{Name: entry.Name(), URL: browseURL(b.Name, child, token), Kind: kind})
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		browseTemplate.Execute(w, page)
+		writeBrowsePage(w, page)
 	})
+}
+
+func newBrowsePage(b bucket.Bucket, relative, token string) browsePage {
+	page := browsePage{Bucket: b, Path: relative}
+	if relative != "" {
+		parent := path.Dir(relative)
+		if parent == "." {
+			parent = ""
+		}
+		page.ParentURL = browseURL(b.Name, parent, token)
+	}
+	return page
+}
+
+func serveArchiveView(w http.ResponseWriter, r *http.Request, b bucket.Bucket, relative, token string) {
+	file, err := archive.Default.TryOpen(r.Context(), filepath.Join(b.Path, filepath.FromSlash(relative)))
+	if errors.Is(err, archive.ErrBusy) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Archive is busy; try again", http.StatusServiceUnavailable)
+		return
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+		} else if errors.Is(err, archive.ErrUnavailable) {
+			http.Error(w, "Archive is unavailable after a storage failure", http.StatusServiceUnavailable)
+		} else {
+			http.Error(w, "Unable to open committed archive", http.StatusInternalServerError)
+		}
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.Error(w, "Unable to read archive path", http.StatusInternalServerError)
+		return
+	}
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(relative)))
+		http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+		return
+	}
+	page := newBrowsePage(b, relative, token)
+	page.IsArchive = true
+	page.DownloadURL = addQuery(browseURL(b.Name, relative, token), "download", "1")
+	reader := tar.NewReader(file)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "Unable to read TAR archive", http.StatusInternalServerError)
+			return
+		}
+		if archive.IsInternalEntry(header) {
+			continue
+		}
+		metadata, _ := json.Marshal(header.PAXRecords)
+		row := archiveRow{ID: header.Name, URL: shared.ObjectURL(b.Name, header.Name, token),
+			StoredSize: header.Size, OriginalSize: header.Size, Filename: header.Uname,
+			MimeType: header.Gname, Compressed: header.Mode == 1, Metadata: string(metadata)}
+		if row.Compressed {
+			row.OriginalSize = int64(header.Uid)
+		}
+		if row.MimeType == "application/avro" {
+			row.AvroURL = addQuery(row.URL, "parse", "avro")
+		}
+		page.Rows = append(page.Rows, row)
+	}
+	writeBrowsePage(w, page)
+}
+
+func writeBrowsePage(w http.ResponseWriter, page browsePage) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	browseTemplate.Execute(w, page)
 }
 
 func validBrowsePath(relative string) bool {
