@@ -185,10 +185,11 @@ func HTTPSACME(domainNames []string, mux http.Handler, acme_server string) error
 	httpsServer := &http.Server{
 		ReadHeaderTimeout: 10000 * time.Second,
 		ReadTimeout:       30000 * time.Second,
-		WriteTimeout:      20000 * time.Minute,
-		IdleTimeout:       50000 * time.Minute,
-		Handler:           mux,
-		BaseContext:       func(listener net.Listener) context.Context { return ctx },
+		// The router arms response write deadlines when output starts. A
+		// whole-request WriteTimeout would also limit upload body buffering.
+		IdleTimeout: 50000 * time.Minute,
+		Handler:     mux,
+		BaseContext: func(listener net.Listener) context.Context { return ctx },
 	}
 	httpsServer.SetKeepAlivesEnabled(false)
 

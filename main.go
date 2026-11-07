@@ -9,6 +9,7 @@ import (
 	"glacier/gui"
 	"glacier/prometheus"
 	"glacier/s3"
+	"glacier/shared"
 	"log"
 	"net/http"
 
@@ -67,6 +68,7 @@ func NewServer() (*mux.Router, error) {
 	mimetype.Extend(avroDetector, "application/avro", ".avro")
 
 	r := mux.NewRouter()
+	r.Use(shared.LimitResponseWrites)
 	r.PathPrefix("/static/").Handler(http.FileServer(http.FS(assets)))
 	r.Handle("/", s3.S3Security(s3.ListBuckets(store))).MatcherFunc(func(r *http.Request, _ *mux.RouteMatch) bool {
 		return s3.IsS3Request(r)

@@ -212,6 +212,13 @@ operations, whose locks remain entirely in memory. Object payloads may be
 compressed inside their TAR entries; the HTTP and S3 download handlers restore
 the original bytes.
 
+Object and raw TAR downloads hold their archive lock while streaming. Response
+writes have a 30-second deadline, refreshed for each chunk, so stalled clients
+eventually release that lock. This applies to HTTP and HTTPS and starts when the
+response is written, leaving upload buffering unchanged. Downloads that keep
+making progress can run longer than 30 seconds. HTML archive listings release
+the lock after collecting their metadata, before sending the page.
+
 Each TAR has a matching `.commit` checkpoint and an internal identity manifest
 as its first entry.
 For a new archive, uploads first persist the newly created directory chain.
@@ -252,8 +259,11 @@ oldest-hour order across all buckets until usage is at or below
 `DISK_USAGE_ALLOWED`. Busy archives are skipped, and bucket metadata is retained.
 Cleanup unlinks and syncs the TAR before removing its checkpoint; it does not
 need to allocate a deletion marker when the disk is full. Orphan checkpoints are
-reaped with interrupted checkpoint temporary files without recreating missing
-TAR files, including when there is no disk pressure.
+reaped without recreating missing TAR files, including when there is no disk
+pressure. The same cleanup walk collects abandoned checkpoint temporary files
+and removes them under their archive's exclusive lock, skipping busy archives.
+Appends and recovery validate the committed checkpoint without scanning sibling
+files for temporary checkpoints; unpublished temporary files wait for cleanup.
 There are no per-bucket quotas or guaranteed retention periods. The threshold
 measures the filesystem containing `DATA_FOLDER`, not just this application's
 files. [Extended retention](docs/configuration.md#extended-retention) is an

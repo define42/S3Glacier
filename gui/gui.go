@@ -131,8 +131,9 @@ var browseTemplate = template.Must(template.New("browse").Parse(`<!doctype html>
 
 // FileView exposes only a bucket's dated archive tree, never its configuration
 // files or another bucket's storage directory. TAR reads use the shared archive
-// coordinator before opening or stating their data and hold the read lock until
-// the response finishes. Checkpoints and the internal manifest are not listed.
+// coordinator before opening or stating their data. Raw downloads hold the read
+// lock until streaming finishes; HTML listings release it before rendering their
+// metadata snapshot. Checkpoints and the internal manifest are not listed.
 func FileView(store *bucket.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !shared.AuthorizeRead(w, r) {
@@ -284,6 +285,12 @@ func serveArchiveView(w http.ResponseWriter, r *http.Request, b bucket.Bucket, r
 			row.AvroURL = addQuery(row.URL, "parse", "avro")
 		}
 		page.Rows = append(page.Rows, row)
+	}
+	// The page now owns its metadata snapshot. Release the archive before a slow
+	// browser can block template output and hold up appends to this shard.
+	if err := file.Close(); err != nil {
+		http.Error(w, "Unable to close archive", http.StatusInternalServerError)
+		return
 	}
 	writeBrowsePage(w, page)
 }

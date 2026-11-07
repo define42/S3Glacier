@@ -132,6 +132,15 @@ entries are released after their holders and waiters finish. Existing TARs witho
 the checkpoint/manifest format are rejected; there is no automatic adoption or
 migration of older archives.
 
+Object and raw TAR responses keep their archive read lock while streaming.
+HTTP and HTTPS response writes have a 30-second deadline, refreshed before each
+chunk of at most 32 KiB and before flushing. The deadline starts with response
+output, so receiving and buffering an upload does not consume its write window.
+There is no fixed maximum download duration: successive writes refresh the
+deadline. A blocked write times out and releases the archive lock when the
+handler returns. HTML archive listings release the lock before rendering their
+already collected metadata.
+
 Before creating a new archive, the server creates and syncs its directory chain,
 including the parents needed to persist newly created directories. Before an
 upload is acknowledged, the server writes the entry and TAR footer, syncs and
@@ -165,8 +174,12 @@ archives by resolved folder hour across all buckets and rechecks usage before
 each deletion. Archives with busy locks are skipped. Deletion syncs removal of
 the TAR before removing its checkpoint, without allocating a deletion marker.
 Orphan checkpoints do not count toward the data-window metric and are reaped
-with interrupted checkpoint temporary files, without recreating their missing
-TARs. This metadata cleanup also runs below the disk-pressure threshold. Bucket
+without recreating their missing TARs. The same tree walk collects interrupted
+checkpoint temporary files and batches their removal per archive under its
+exclusive lock, syncing the directory after removal. Busy archives wait for a
+later pass. Appends and recovery do not rescan the hour directory for temporary
+files; committed checkpoints remain the recovery authority. This metadata
+cleanup also runs below the disk-pressure threshold. Bucket
 definitions remain in place, so an
 emptied bucket retains its original configuration.
 

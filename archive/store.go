@@ -214,7 +214,8 @@ func (s *Store) Append(ctx context.Context, path string, header *tar.Header, dat
 
 // TryDelete evicts an archive without waiting for readers or writers and without
 // allocating a deletion marker. It syncs the TAR unlink before removing its
-// checkpoint. Orphan checkpoints are reaped without recreating their TAR.
+// checkpoint. Temporary checkpoint files are scavenged separately using names
+// collected by periodic cleanup. Orphan checkpoints never recreate their TAR.
 // The in-memory lock remains shared with any waiters across path recreation.
 func (s *Store) TryDelete(ctx context.Context, path string) (bool, error) {
 	path, err := canonical(path)
@@ -256,9 +257,6 @@ func (s *Store) TryDelete(ctx context.Context, path string) (bool, error) {
 	if err := removeCheckpoint(path); err != nil {
 		return removed, s.quarantine(path, err)
 	}
-	if err := removeTemps(path); err != nil {
-		return removed, s.quarantine(path, err)
-	}
 	if err := s.confirmDeletion(path); err != nil {
 		return removed, s.quarantine(path, err)
 	}
@@ -297,9 +295,6 @@ func (s *Store) TryReapOrphan(ctx context.Context, path string) (bool, error) {
 		return false, err
 	}
 	if err := removeCheckpoint(path); err != nil {
-		return false, s.quarantine(path, err)
-	}
-	if err := removeTemps(path); err != nil {
 		return false, s.quarantine(path, err)
 	}
 	if err := s.confirmDeletion(path); err != nil {

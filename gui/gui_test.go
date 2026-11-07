@@ -2,6 +2,7 @@ package gui
 
 import (
 	"archive/tar"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"glacier/archive"
@@ -182,6 +183,50 @@ func TestFileViewHidesCheckpoints(t *testing.T) {
 	view.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("checkpoint direct access status = %d", response.Code)
+	}
+}
+
+func TestFileViewReleasesArchiveBeforeRendering(t *testing.T) {
+	store, data := testStore(t)
+	const relative = "2026/11/07/10/0000.tar"
+	writeGUIArchive(t, data.Path, relative, "existing-object")
+	archivePath := filepath.Join(data.Path, filepath.FromSlash(relative))
+	request := mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/files/"+relative, nil), map[string]string{"path": relative})
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	writer := &blockingBrowseWriter{ResponseRecorder: httptest.NewRecorder(), started: started, release: release}
+	t.Cleanup(func() {
+		unblock()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("archive page did not finish")
+		}
+	})
+	go func() { defer close(done); FileView(store).ServeHTTP(writer, request) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("archive page did not start rendering")
+	}
+
+	// The response is still blocked, but its metadata snapshot no longer needs
+	// the TAR. A writer must be able to commit without waiting for the browser.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	payload := []byte("new object")
+	header := &tar.Header{Name: "appended-during-render", Uname: "new-object", Size: int64(len(payload)), Format: tar.FormatPAX}
+	if committed, err := archive.Default.Append(ctx, archivePath, header, payload, sha256.Sum256(payload)); err != nil || !committed {
+		t.Fatalf("append blocked by HTML rendering: committed=%v, error=%v", committed, err)
+	}
+	unblock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("archive page did not finish after unblocking")
+	}
+	if writer.Code != http.StatusOK || !strings.Contains(writer.Body.String(), "existing-object") || strings.Contains(writer.Body.String(), "new-object") {
+		t.Fatalf("archive page did not retain its original snapshot: %d %s", writer.Code, writer.Body)
 	}
 }
 

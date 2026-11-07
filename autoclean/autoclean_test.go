@@ -266,10 +266,97 @@ func TestCleanupReapsTemporaryCheckpointWithoutArchive(t *testing.T) {
 	}
 }
 
+func TestCleanupScavengesScannedTempsWithoutEviction(t *testing.T) {
+	t.Parallel()
+	for _, failMeasurement := range []bool{false, true} {
+		name := "below threshold"
+		if failMeasurement {
+			name = "disk measurement fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			paths := []string{
+				writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar"),
+				writeTestFile(t, root, "buckets/data/2026/11/07/10/0001.tar"),
+			}
+			temps := []string{
+				writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-first"),
+				writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-second"),
+				writeTestFile(t, root, "buckets/data/2026/11/07/10/.0001.tar.commit-stale"),
+				writeTestFile(t, root, "buckets/data/2026/11/07/09/.0002.tar.commit-orphan"),
+			}
+			candidates, err := collectArchives(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A pass must remove only names from its one tree walk; a later
+			// temporary file is handled by the next pass, not a shard rescan.
+			unseen := writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-after-scan")
+			checks := 0
+			retained, err := cleanupArchives(candidates, 75, func() (float64, error) {
+				checks++
+				if failMeasurement {
+					return 0, errors.New("disk unavailable")
+				}
+				return 70, nil
+			})
+			if (err != nil) != failMeasurement || len(retained) != len(paths) || checks != 1 {
+				t.Fatalf("temporary cleanup: retained=%v checks=%d err=%v", retained, checks, err)
+			}
+			for _, path := range temps {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("scanned temporary file remains: %q: %v", path, err)
+				}
+			}
+			if _, err := os.Stat(unseen); err != nil {
+				t.Fatal("cleanup rescanned and removed a name absent from its snapshot", err)
+			}
+			for _, path := range paths {
+				reader, err := archive.Default.Open(t.Context(), path)
+				if err != nil {
+					t.Fatalf("temporary cleanup damaged committed archive: %v", err)
+				}
+				reader.Close()
+			}
+		})
+	}
+}
+
+func TestCleanupTempScavengingSkipsActiveReader(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar")
+	temporary := writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-stale")
+	reader, err := archive.Default.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	candidates, err := collectArchives(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleanupArchives(candidates, 75, func() (float64, error) { return 70, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); err != nil {
+		t.Fatal("cleanup bypassed the archive read lock", err)
+	}
+	reader.Close()
+	if _, err := cleanupArchives(candidates, 75, func() (float64, error) { return 70, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("cleanup did not retry after the reader finished", err)
+	}
+}
+
 func TestCleanupOrphanScanDoesNotDeleteRecreatedArchive(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	path := writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar")
+	temporary := writeTestFile(t, root, "buckets/data/2026/11/07/10/.0000.tar.commit-old-generation")
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +367,9 @@ func TestCleanupOrphanScanDoesNotDeleteRecreatedArchive(t *testing.T) {
 	writeTestFile(t, root, "buckets/data/2026/11/07/10/0000.tar")
 	if _, err := cleanupArchives(candidates, 75, func() (float64, error) { return 70, nil }); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old-generation temporary checkpoint survived cleanup: %v", err)
 	}
 	reader, err := archive.Default.Open(t.Context(), path)
 	if err != nil {

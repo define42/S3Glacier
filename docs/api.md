@@ -125,6 +125,13 @@ UUID helpers and redirects accept `?bucket={name}`. UUID responses use the field
 
 Browser paths are dated directories such as `2026/11/07/12/` or a TAR filename within an hour. TAR pages show committed user-object entries and offer a raw archive link. Checkpoint files and the internal archive manifest are hidden from these listings. Add `?download=1` to an existing TAR path to receive an `application/x-tar` attachment, including the manifest, under the same read authorization and archive lock. Configuration directories and symlink paths are excluded. A busy archive can return `503` with `Retry-After: 1`. Archives in an unsupported or unrecoverable checkpoint format fail rather than exposing uncommitted bytes.
 
+HTML TAR listings release the archive lock after collecting their rows and before
+rendering the response. Object and raw TAR downloads retain the lock while
+streaming. Response writes have a 30-second deadline refreshed as chunks are
+sent, so a stalled client eventually releases the shard. This is a per-write
+limit, not a maximum duration for a progressing download, and does not limit the
+time spent buffering an upload before its response starts.
+
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $READ_TOKEN" \
   "$BASE/buckets/logs/files/"

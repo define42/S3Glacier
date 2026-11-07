@@ -110,7 +110,9 @@ func (s *Store) openChecked(path string) (*os.File, error) {
 }
 
 // recover is called only under the exclusive lock. It never adopts uncommitted
-// entries and never extends missing committed bytes with zeroes.
+// entries and never extends missing committed bytes with zeroes. Unpublished
+// checkpoint temporaries are left for periodic cleanup; recovering a healthy
+// archive must not enumerate all sibling shards on every append.
 func (s *Store) recover(path string) (checkpoint, error) {
 	var c checkpoint
 	if err := checkParents(path); err != nil {
@@ -141,9 +143,6 @@ func (s *Store) recover(path string) (checkpoint, error) {
 		if err := f.Close(); err != nil {
 			return c, s.quarantine(path, err)
 		}
-		if err := removeTemps(path); err != nil {
-			return c, s.quarantine(path, err)
-		}
 		return c, nil
 	}
 	if !errors.Is(err, errRecovery) {
@@ -170,9 +169,6 @@ func (s *Store) recover(path string) (checkpoint, error) {
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {
-		return c, s.quarantine(path, err)
-	}
-	if err := removeTemps(path); err != nil {
 		return c, s.quarantine(path, err)
 	}
 	return c, nil

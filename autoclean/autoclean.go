@@ -38,9 +38,10 @@ func getDiskUsageAllowed() float64 {
 var DiskUsageAllowed = getDiskUsageAllowed()
 
 type archiveCandidate struct {
-	path    string
-	hour    time.Time
-	hasData bool
+	path      string
+	hour      time.Time
+	hasData   bool
+	tempNames []string
 }
 
 // archiveHour accepts only the bucket archive layout.
@@ -99,6 +100,9 @@ func collectArchives(root string) ([]archiveCandidate, error) {
 		candidate := byPath[archivePath]
 		candidate.path, candidate.hour = archivePath, hour
 		candidate.hasData = candidate.hasData || !metadata
+		if metadata && entry.Name() != filepath.Base(archive.CommitPath(archivePath)) {
+			candidate.tempNames = append(candidate.tempNames, entry.Name())
+		}
 		byPath[archivePath] = candidate
 		return nil
 	})
@@ -129,6 +133,14 @@ func cleanupArchives(candidates []archiveCandidate, allowed float64, diskUsage f
 	var measurementErr error
 	stopEvicting := false
 	for _, candidate := range candidates {
+		// Discover temporary files once in collectArchives, then remove only
+		// those names under their archive lock. Busy publications are skipped;
+		// names created after the scan are left for the next cleanup pass.
+		if len(candidate.tempNames) != 0 {
+			if _, err := archive.Default.TryRemoveTemps(context.Background(), candidate.path, candidate.tempNames); err != nil {
+				fmt.Printf("Temporary checkpoint cleanup skipped %q: %v\n", candidate.path, err)
+			}
+		}
 		if !candidate.hasData {
 			// Recheck absence under the archive key lock. A new writer may have
 			// recreated this path after collection; it must not be evicted here.
@@ -200,8 +212,10 @@ func runCleanup(root string, allowed float64, diskUsage func() (float64, error),
 
 // AutoClean runs disk-pressure cleanup until the process exits. Each pass scans
 // all buckets and removes the oldest unlocked archives until fresh disk usage
-// is at or below DiskUsageAllowed. Orphan checkpoints are reaped independently
-// of disk pressure and do not affect the data-window metric. Busy archives are
+// is at or below DiskUsageAllowed. Each scan batches temporary checkpoint names
+// by archive so scavenging never rescans an hour for each shard. Temporary files
+// and orphan checkpoints are reaped independently of disk pressure and do not
+// affect the data-window metric. Busy archives are
 // skipped, errors are logged, and the next pass starts after a ten-second pause.
 // Call it in a goroutine.
 func AutoClean() {

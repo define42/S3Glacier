@@ -357,9 +357,6 @@ func (s *Store) initialize(path string, c checkpoint) (checkpoint, error) {
 	if err := s.publish(path, c); err != nil {
 		return c, s.quarantine(path, err)
 	}
-	if err := removeTemps(path); err != nil {
-		return c, s.quarantine(path, err)
-	}
 	return c, nil
 }
 
@@ -417,9 +414,6 @@ func (s *Store) prepare(path string) (checkpoint, error) {
 	if err := removeCheckpoint(path); err != nil {
 		return checkpoint{}, s.quarantine(path, err)
 	}
-	if err := removeTemps(path); err != nil {
-		return checkpoint{}, s.quarantine(path, err)
-	}
 	var generation [16]byte
 	if _, err := rand.Read(generation[:]); err != nil {
 		return checkpoint{}, err
@@ -439,29 +433,4 @@ func removeCheckpoint(path string) error {
 		return err
 	}
 	return syncDirectory(filepath.Dir(path))
-}
-
-func removeTemps(path string) error {
-	entries, err := os.ReadDir(filepath.Dir(path))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	prefix := "." + filepath.Base(path) + ".commit-"
-	removed := false
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), prefix) || entry.IsDir() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(filepath.Dir(path), entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		removed = true
-	}
-	if removed {
-		return syncDirectory(filepath.Dir(path))
-	}
-	return nil
 }
