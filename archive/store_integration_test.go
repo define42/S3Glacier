@@ -125,7 +125,7 @@ func TestStoreDuplicateAppendCrashPreservesFirstEntry(t *testing.T) {
 
 func TestStoreRecoversAfterProcessExitDuringCreation(t *testing.T) {
 	t.Parallel()
-	for _, stage := range []string{"checkpoint.renamed", "create.written", "create.synced"} {
+	for _, stage := range []string{"directories.created", "directories.synced", "checkpoint.renamed", "create.written", "create.synced"} {
 		t.Run(stage, func(t *testing.T) {
 			path := storeTestPath(t)
 			storeTestCrash(t, path, "append", stage)

@@ -214,8 +214,12 @@ the original bytes.
 
 Each TAR has a matching `.commit` checkpoint and an internal identity manifest
 as its first entry.
-Successful uploads sync the TAR, durably publish the checkpoint, and sync its
-directory before acknowledging success. Reads also confirm
+For a new archive, uploads first persist the newly created directory chain.
+They then write the complete entry and TAR footer, sync and close the TAR, write
+and sync a temporary checkpoint, atomically publish it, and sync its directory.
+Success is acknowledged only after all those steps succeed. Startup also confirms
+the bucket-definition directory is durable before exposing loaded buckets.
+Reads also confirm
 the checkpoint's directory entry is durable, including after a process restart.
 After an interrupted append, recovery
 restores the last committed boundary and TAR footer under the exclusive lock;

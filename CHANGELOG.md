@@ -38,6 +38,8 @@ current development branch and do not imply a published version.
 
 ### Fixed
 
+- Startup confirms bucket-definition directory durability before exposing loaded
+  buckets, including after interrupted bucket creation.
 - Uploads append without rescanning existing entries in the archive.
 - Archive cleanup shares the same lock as readers and writers, so deletion and
   recreation cannot bypass synchronization by locking different file inodes.

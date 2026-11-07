@@ -79,7 +79,13 @@ type diskConfig struct {
 // If absent, the data bucket is created at root/buckets/data with a fixed count
 // of 256. Empty roots, filesystem errors, and invalid or unsupported persisted
 // configurations return an error; existing definitions are never migrated.
+// Loaded configuration names are synced before they can be used by uploads,
+// including after a process died during configuration publication.
 func Open(root string) (*Store, error) {
+	return open(root, syncDirectory)
+}
+
+func open(root string, syncDir func(string) error) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("bucket: data root is empty")
 	}
@@ -91,7 +97,7 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(s.metaDir, 0700); err != nil {
 		return nil, fmt.Errorf("bucket: create configuration directory: %w", err)
 	}
-	if err := syncDirectory(s.root); err != nil {
+	if err := syncDir(s.root); err != nil {
 		return nil, err
 	}
 	lock := flock.New(filepath.Join(s.metaDir, ".lock"))
@@ -108,6 +114,12 @@ func Open(root string) (*Store, error) {
 		if _, err := s.create(DefaultName, DefaultTarFilesPerHour); err != nil {
 			return nil, err
 		}
+	}
+	// A previous process may have linked a synced configuration into this
+	// directory and died before syncing the link. Confirm the loaded names
+	// before allowing uploads to rely on their bucket definitions.
+	if err := syncDir(s.metaDir); err != nil {
+		return nil, fmt.Errorf("bucket: confirm configuration directory: %w", err)
 	}
 	return s, nil
 }

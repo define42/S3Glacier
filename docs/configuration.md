@@ -132,8 +132,12 @@ entries are released after their holders and waiters finish. Existing TARs witho
 the checkpoint/manifest format are rejected; there is no automatic adoption or
 migration of older archives.
 
-Before an upload is acknowledged, the server syncs the TAR, writes and syncs a
-new checkpoint, atomically publishes it, and syncs its directory. Reads confirm
+Before creating a new archive, the server creates and syncs its directory chain,
+including the parents needed to persist newly created directories. Before an
+upload is acknowledged, the server writes the entry and TAR footer, syncs and
+closes the TAR, writes and syncs a new checkpoint, atomically publishes it, and
+syncs its directory. Startup confirms the bucket-definition directory is durable
+before exposing loaded buckets, including after interrupted publication. Reads confirm
 directory durability before exposing existing state, including after a process
 restart. Recovery runs under the exclusive archive lock and restores the committed
 boundary and footer before serving the archive. If a storage write or sync fails, that archive is

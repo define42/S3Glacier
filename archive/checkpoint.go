@@ -140,17 +140,26 @@ func (s *Store) confirmDeletion(path string) error {
 
 // Directory creation is infrequent. Sync the complete chain so a newly created
 // hour cannot disappear even when several new ancestors were created together.
-func durableDirectories(path string) error {
+func (s *Store) durableDirectories(path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return err
 	}
+	if err := s.step("directories.created"); err != nil {
+		return err
+	}
 	for {
+		if err := s.step("directories.before-sync"); err != nil {
+			return err
+		}
 		if err := syncDirectory(path); err != nil {
+			return err
+		}
+		if err := s.step("directories.synced"); err != nil {
 			return err
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return nil
+			return s.step("directories.durable")
 		}
 		path = parent
 	}
@@ -402,7 +411,7 @@ func (s *Store) prepare(path string) (checkpoint, error) {
 	}
 	// A missing TAR is absent, even if cleanup crashed before removing its
 	// checkpoint. Reset that orphan durably before creating a new generation.
-	if err := durableDirectories(filepath.Dir(path)); err != nil {
+	if err := s.durableDirectories(filepath.Dir(path)); err != nil {
 		return checkpoint{}, s.quarantine(path, err)
 	}
 	if err := removeCheckpoint(path); err != nil {
