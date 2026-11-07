@@ -421,8 +421,7 @@ func assertPayloadError(t *testing.T, err error, wantCode string) {
 		}
 		return
 	}
-	var v4Err *V4Error
-	if !errors.As(err, &v4Err) || v4Err.Code != wantCode {
+	if v4Err, ok := errors.AsType[*V4Error](err); !ok || v4Err.Code != wantCode {
 		t.Fatalf("payload error = %v, want code %s", err, wantCode)
 	}
 }

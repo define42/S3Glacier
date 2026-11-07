@@ -193,6 +193,20 @@ and removes the oldest archives across **all** buckets by hour, regardless of
 bucket name. It preserves bucket definitions, so an emptied bucket keeps its
 original count. There are no per-bucket capacity quotas or retention policies.
 
+## Development checks
+
+Use the Go version specified in `go.mod`. Linting requires a Go 1.27-compatible
+golangci-lint v2 build (validated with v2.15.0).
+`make lint` finds the binary in `go env GOBIN`, falling back to the first
+`GOPATH` entry's `bin` directory. Override it with
+`make lint GOLANGCI_LINT=/path/to/golangci-lint` when needed.
+
+```sh
+make test       # Run the Go test suite.
+make lint       # Run vet and modernization checks from .golangci.yml.
+make modernize  # Apply the Go toolchain's suggested code updates.
+```
+
 ## Build and container images
 
 GitHub Actions runs tests with race detection, vets the code, and builds the binary

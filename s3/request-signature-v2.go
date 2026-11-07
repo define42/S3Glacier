@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -42,9 +42,7 @@ const (
 func encodeURL2Path(req *http.Request, virtualHost bool) (path string) {
 	if virtualHost {
 		reqHost := getHostAddr(req)
-		dotPos := strings.Index(reqHost, ".")
-		if dotPos > -1 {
-			bucketName := reqHost[:dotPos]
+		if bucketName, _, ok := strings.Cut(reqHost, "."); ok {
 			path = "/" + bucketName
 			path += req.URL.Path
 			path = s3utils.EncodePath(path)
@@ -227,7 +225,7 @@ func writeCanonicalizedHeaders(buf *bytes.Buffer, req http.Request) {
 			vals[lk] = vv
 		}
 	}
-	sort.Strings(protoHeaders)
+	slices.Sort(protoHeaders)
 	for _, k := range protoHeaders {
 		buf.WriteString(k)
 		buf.WriteByte(':')

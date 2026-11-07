@@ -6,7 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -86,7 +86,7 @@ func TestCollectArchives(t *testing.T) {
 		}
 		got = append(got, filepath.ToSlash(path))
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("archive order = %v, want %v", got, want)
 	}
 }

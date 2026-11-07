@@ -49,7 +49,7 @@ func TestS3(t *testing.T) {
 	if err2 != nil {
 		t.Fatalf("Unable to read file! Error:%v", err2)
 	}
-	if bytes.Compare(outputData, data) != 0 {
+	if !bytes.Equal(outputData, data) {
 		t.Fatalf("Upload/download did not pass! Want:\"%v\" Have:\"%v\"", string(data), string(outputData))
 	}
 
@@ -77,7 +77,12 @@ func TestServer(t *testing.T) {
 	if err := bodyWriter.Close(); err != nil {
 		t.Fatalf("Error closing upload form: %v", err)
 	}
-	resp, err := testServer.Client().Post(testServer.URL+"/upload", contentType, bodyBuf)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, testServer.URL+"/upload", bodyBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", contentType)
+	resp, err := testServer.Client().Do(request)
 	if err != nil {
 		t.Fatalf("Unable to upload file: %v", err)
 	}
@@ -87,7 +92,11 @@ func TestServer(t *testing.T) {
 		t.Fatalf("Wrong response-code! Have:\"%v\"", resp.Status)
 	}
 
-	getresp, err := testServer.Client().Get(testServer.URL + "/get/" + test_uuid)
+	request, err = http.NewRequestWithContext(t.Context(), http.MethodGet, testServer.URL+"/get/"+test_uuid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getresp, err := testServer.Client().Do(request)
 	if err != nil {
 		t.Fatalf("Unable to get file! Error:%v", err)
 	}
@@ -101,7 +110,7 @@ func TestServer(t *testing.T) {
 		t.Fatalf("Unable to read file: %v", err)
 	}
 
-	if bytes.Compare(getbody, data) != 0 {
+	if !bytes.Equal(getbody, data) {
 		t.Fatalf("Upload/download did not pass! Want:\"%v\" Have:\"%v\"", string(data), string(getbody))
 	}
 }

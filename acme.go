@@ -3,18 +3,18 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
-	"crypto/x509"
-	"encoding/pem"
-	"io/ioutil"
+
 	"github.com/caddyserver/certmagic"
 )
-
 
 func LoadCertBundleFromPEM(pemBytes []byte) ([]*x509.Certificate, error) {
 	certificates := []*x509.Certificate{}
@@ -40,7 +40,7 @@ func LoadCertBundleFromPEM(pemBytes []byte) ([]*x509.Certificate, error) {
 }
 
 func LoadCertBundleFromFile(filename string) ([]*x509.Certificate, error) {
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
@@ -48,23 +48,25 @@ func LoadCertBundleFromFile(filename string) ([]*x509.Certificate, error) {
 	return LoadCertBundleFromPEM(b)
 }
 
-func ReadCertificates() (*x509.CertPool) {
-        certpool, err :=x509.SystemCertPool()
-         if err != nil {
-                 panic(err)
-        }
+func ReadCertificates() *x509.CertPool {
+	certpool, err := x509.SystemCertPool()
+	if err != nil {
+		panic(err)
+	}
 	caFolder := "/data/ca/"
-        files, err := ioutil.ReadDir(caFolder)
-        if err != nil {
+	files, err := os.ReadDir(caFolder)
+	if err != nil {
+		// Do not load certificates from a partial directory listing.
+		files = nil
 		fmt.Println("No Root CA found in:", caFolder)
-        }
-        for _, file := range files {
+	}
+	for _, file := range files {
 
 		certs, err := LoadCertBundleFromFile(caFolder + file.Name())
-               	if err != nil {
-			fmt.Println("Failed to load Root CA file:", caFolder + file.Name())
-               	        panic(err)
-               	}
+		if err != nil {
+			fmt.Println("Failed to load Root CA file:", caFolder+file.Name())
+			panic(err)
+		}
 
 		fmt.Println("Adding CA Root certificate from:", file.Name())
 		for _, cert := range certs {
@@ -74,16 +76,16 @@ func ReadCertificates() (*x509.CertPool) {
 
 	// Read system default Root CA
 	defaultCaFile := "/etc/ssl/certs/ca-certificates.crt"
-        certs, err := LoadCertBundleFromFile(defaultCaFile)
-        if err != nil {
-                fmt.Println("Failed to load default Root CA file:", defaultCaFile)
-                log.Fatal(err)
-        }
+	certs, err := LoadCertBundleFromFile(defaultCaFile)
+	if err != nil {
+		fmt.Println("Failed to load default Root CA file:", defaultCaFile)
+		log.Fatal(err)
+	}
 
-        fmt.Println("Adding default CA Root certificate from:", defaultCaFile)
-        for _, cert := range certs {
-                certpool.AddCert(cert)
-        }
+	fmt.Println("Adding default CA Root certificate from:", defaultCaFile)
+	for _, cert := range certs {
+		certpool.AddCert(cert)
+	}
 	return certpool
 }
 
@@ -95,10 +97,9 @@ func HTTPSACME(domainNames []string, mux http.Handler, acme_server string) error
 	}
 
 	certmagic.DefaultACME.Agreed = true
-        certmagic.DefaultACME.CA = acme_server
-        certmagic.Default.Storage = &certmagic.FileStorage{Path: "/data/acme/"}
+	certmagic.DefaultACME.CA = acme_server
+	certmagic.Default.Storage = &certmagic.FileStorage{Path: "/data/acme/"}
 	certmagic.DefaultACME.TrustedRoots = ReadCertificates()
-
 
 	cfg := certmagic.NewDefault()
 

@@ -290,8 +290,8 @@ func newV4TestRequest(t *testing.T, method, target, body string) *http.Request {
 
 func assertV4Failure(t *testing.T, err error, code string) {
 	t.Helper()
-	var failure *V4Error
-	if !errors.As(err, &failure) {
+	failure, ok := errors.AsType[*V4Error](err)
+	if !ok {
 		t.Fatalf("expected %s error, got %v", code, err)
 	}
 	if failure.Code != code {

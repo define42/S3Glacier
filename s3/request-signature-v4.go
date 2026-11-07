@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -8,7 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ func IsS3Request(r *http.Request) bool {
 }
 
 func hasV4Query(r *http.Request) bool {
-	for _, pair := range strings.Split(r.URL.RawQuery, "&") {
+	for pair := range strings.SplitSeq(r.URL.RawQuery, "&") {
 		name, _, _ := strings.Cut(pair, "=")
 		decoded, err := url.QueryUnescape(name)
 		if err == nil && v4AuthQueryNames[decoded] {
@@ -187,7 +188,7 @@ func parseV4Credentials(r *http.Request, query url.Values) (v4Credentials, error
 			return c, v4Error(http.StatusBadRequest, "InvalidRequest", "AWS4-HMAC-SHA256 authentication is required.")
 		}
 		parts := make(map[string]string)
-		for _, field := range strings.Split(fields, ",") {
+		for field := range strings.SplitSeq(fields, ",") {
 			name, value, ok := strings.Cut(strings.TrimSpace(field), "=")
 			if !ok || value == "" || parts[name] != "" {
 				return c, malformedV4Authorization()
@@ -301,7 +302,10 @@ func canonicalV4Headers(r *http.Request, signed string, query url.Values) (strin
 				return "", v4Error(http.StatusBadRequest, "InvalidRequest", "Signed header and query parameter values conflict.")
 			}
 		}
-		result.WriteString(name + ":" + value + "\n")
+		result.WriteString(name)
+		result.WriteByte(':')
+		result.WriteString(value)
+		result.WriteByte('\n')
 	}
 	return result.String(), nil
 }
@@ -358,11 +362,7 @@ func v4PayloadHash(r *http.Request, query url.Values) (string, error) {
 }
 
 func canonicalV4URI(u *url.URL) string {
-	path := u.Path
-	if path == "" {
-		path = "/"
-	}
-	return encodeV4(path, false)
+	return encodeV4(cmp.Or(u.Path, "/"), false)
 }
 
 func canonicalV4Query(query url.Values, presigned bool) string {
@@ -376,11 +376,11 @@ func canonicalV4Query(query url.Values, presigned bool) string {
 			pairs = append(pairs, queryPair{name: encodeV4(name, true), value: encodeV4(value, true)})
 		}
 	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].name != pairs[j].name {
-			return pairs[i].name < pairs[j].name
+	slices.SortFunc(pairs, func(a, b queryPair) int {
+		if order := cmp.Compare(a.name, b.name); order != 0 {
+			return order
 		}
-		return pairs[i].value < pairs[j].value
+		return cmp.Compare(a.value, b.value)
 	})
 	encoded := make([]string, 0, len(pairs))
 	for _, pair := range pairs {
@@ -434,8 +434,7 @@ func v4Error(status int, code, message string) error {
 }
 
 func writeV4Error(w http.ResponseWriter, r *http.Request, err error) {
-	var failure *V4Error
-	if errors.As(err, &failure) {
+	if failure, ok := errors.AsType[*V4Error](err); ok {
 		writeS3Error(w, r, failure.Status, failure.Code, failure.Message)
 		return
 	}

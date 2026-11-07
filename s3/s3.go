@@ -47,7 +47,7 @@ func AddS3UserReadOnly(users string) {
 }
 
 func addS3Users(users string, write bool) {
-	for _, user := range strings.Split(users, ";") {
+	for user := range strings.SplitSeq(users, ";") {
 		key, secret, ok := strings.Cut(strings.TrimSpace(user), "=")
 		if ok && key != "" && secret != "" {
 			AddS3User(key, secret, write, true)

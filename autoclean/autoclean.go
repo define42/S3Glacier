@@ -1,6 +1,7 @@
 package autoclean
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"glacier/config"
@@ -9,7 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -68,7 +69,8 @@ func collectArchives(root string) ([]archiveCandidate, error) {
 			return err
 		}
 		if entry.IsDir() {
-			if relative != "." && strings.Split(filepath.ToSlash(relative), "/")[0] != "buckets" {
+			first, _, _ := strings.Cut(filepath.ToSlash(relative), "/")
+			if relative != "." && first != "buckets" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -85,11 +87,11 @@ func collectArchives(root string) ([]archiveCandidate, error) {
 	}
 	// Bucket names must not affect retention: evict the oldest hour across all
 	// buckets, using the full path only to make ties deterministic.
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].hour.Equal(candidates[j].hour) {
-			return candidates[i].path < candidates[j].path
+	slices.SortFunc(candidates, func(a, b archiveCandidate) int {
+		if order := a.hour.Compare(b.hour); order != 0 {
+			return order
 		}
-		return candidates[i].hour.Before(candidates[j].hour)
+		return cmp.Compare(a.path, b.path)
 	})
 	return candidates, nil
 }

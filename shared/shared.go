@@ -309,7 +309,7 @@ func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byt
 		return "", "", err
 	}
 	if fi.Size() > 0 {
-		if _, err = f.Seek(-2<<9, os.SEEK_END); err != nil {
+		if _, err = f.Seek(-2<<9, io.SeekEnd); err != nil {
 			return "", "", err
 		}
 	}

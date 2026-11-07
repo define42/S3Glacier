@@ -115,7 +115,7 @@ func payloadError(code, message string) *V4Error {
 
 func hasContentEncoding(r *http.Request, encoding string) bool {
 	for _, line := range r.Header.Values("Content-Encoding") {
-		for _, value := range strings.Split(line, ",") {
+		for value := range strings.SplitSeq(line, ",") {
 			if strings.EqualFold(strings.TrimSpace(value), encoding) {
 				return true
 			}
@@ -191,7 +191,7 @@ func decodeV4Chunks(r *http.Request, info *V4SigningInfo) ([]byte, error) {
 	// aws-chunked describes wire framing, not the stored object's encoding.
 	var encodings []string
 	for _, line := range r.Header.Values("Content-Encoding") {
-		for _, value := range strings.Split(line, ",") {
+		for value := range strings.SplitSeq(line, ",") {
 			if value = strings.TrimSpace(value); !strings.EqualFold(value, "aws-chunked") && value != "" {
 				encodings = append(encodings, value)
 			}
