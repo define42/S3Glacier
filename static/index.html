@@ -1,95 +1,189 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="X-UA-Compatible" content="ie=edge" />
-  <title>S3 Glacier</title>
-  <link href="static/bootstrap.css" rel="stylesheet">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>S3 Glacier Archive Server</title>
+  <link href="/static/bootstrap.css" rel="stylesheet">
+  <style>
+    body { background: #f8f9fa; }
+    main { max-width: 1100px; }
+    section { background: white; padding: 1.5rem; margin-bottom: 1.5rem; border: 1px solid #dee2e6; border-radius: .25rem; }
+    label { display: block; font-weight: 600; }
+    code { overflow-wrap: anywhere; }
+    .navbar { gap: 1rem; flex-wrap: wrap; }
+    .status { white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
 </head>
-
 <body>
-
-  <nav class="navbar navbar-expand-lg navbar-light bg-light">
-    <a class="navbar-brand" href="#" style="color:red;"><b>S3 Glacier</b></a>
-    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNavAltMarkup"
-      aria-controls="navbarNavAltMarkup" aria-expanded="false" aria-label="Toggle navigation">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-    <div class="collapse navbar-collapse" id="navbarNavAltMarkup">
-      <div class="navbar-nav">
-        <a class="nav-item nav-link active" href="./files/" target="test">ViewFiles</a>
-        <a class="nav-item nav-link active" href="./uuidv1" target="test">ExampleTimeUUID V1</a>
-        <a class="nav-item nav-link active" href="./uuid" target="test">ExampleTimeUUID V4</a>
-        <a class="nav-item nav-link active" href="./metrics" target="test">Prometheus</a>
-      </div>
-    </div>
+  <nav class="navbar navbar-light bg-white border-bottom px-4" aria-label="Main navigation">
+    <a class="navbar-brand" href="/">S3 Glacier</a>
+    <div class="d-flex flex-wrap"><a class="nav-link" href="#buckets">Buckets</a><a class="nav-link" href="#upload">Upload</a><a class="nav-link" href="#retrieve">Browse and download</a><a class="nav-link" href="/metrics">Prometheus</a></div>
   </nav>
+  <main class="container py-4">
+    <h1 class="mb-3">Archive buckets</h1>
+    <p class="mb-4">Store time ordered blobs in TAR archives. Each bucket has a fixed number of TAR files per hour. All buckets share the server's disk usage limit and oldest data is aged off when that limit is reached.</p>
 
-  <br>
-  <br>
-  <div class="shadow-none p-3 mb-5 bg-light rounded">
-    <h3>Upload with uuid filename</h3>
-    <div>
-      <form enctype="multipart/form-data" action="./upload" method="post">
-        <div class="form-group">
-          <input type="text" name="token" placeholder=token />
-          <input type="file" name="file" multiple/>
-          <input type="submit" value="upload" class="btn btn-primary" />
-      </form>
-    </div>
-  </div>
-  </div>
-
-  <div class="shadow-none p-3 mb-5 bg-light rounded">
-    <h3>Upload without uuid filename(Test only)</h3>
-    <form enctype="multipart/form-data" action="./upload?newuuid=true" method="post">
-      <div class="form-group">
-          <input type="text" name="token" placeholder=token />
-        <input type="file" name="file" multiple/>
-        <input type="submit" value="upload" class="btn btn-primary" />
+    <section aria-labelledby="credentials-heading">
+      <h2 class="h4" id="credentials-heading">Access tokens</h2>
+      <p class="text-muted">Enter the server's read and write tokens when configured. Tokens are used for this page's actions and are not saved by this page.</p>
+      <div class="row">
+        <div class="form-group col-md-6"><label for="read-token">Read token</label><input class="form-control" id="read-token" type="password" autocomplete="off" aria-describedby="read-token-help"><small id="read-token-help" class="form-text text-muted">For listing buckets, browsing archives, and downloads.</small></div>
+        <div class="form-group col-md-6"><label for="write-token">Write token</label><input class="form-control" id="write-token" type="password" autocomplete="off" aria-describedby="write-token-help"><small id="write-token-help" class="form-text text-muted">For creating buckets and uploading files.</small></div>
       </div>
-  </div>
-  </div>
-  </form>
+    </section>
 
-  <div class="shadow-none p-3 mb-5 bg-light rounded">
-    <h3>Download file url</h3>
-    <form action="./redirect" target="_blank" method="get">
-      <div class="form-group">
-        <input type="text" name="file" size=40 />
-        <input type="submit" value="Download" class="btn btn-primary" />
-    </form>
-    <xmp>
-      /get/{uuid}
-    </xmp>
-  </div>
-
-
-  <h3>Supported uploads</h3>
-  <div class="shadow-none p-3 mb-5 bg-light rounded">
-    <b>Multipart</b>
-    Filename must contain a time-uuid
-    <xmp>
-      <form action="/upload" method="post">
-        <input type="file" name="file" />
-        <input type="submit" value="upload" />
+    <section id="buckets" aria-labelledby="buckets-heading">
+      <div class="d-flex align-items-center justify-content-between flex-wrap mb-3"><h2 class="h4 mb-2" id="buckets-heading">Buckets</h2><button id="refresh-buckets" type="button" class="btn btn-outline-secondary">Refresh buckets</button></div>
+      <div class="table-responsive"><table class="table"><thead><tr><th scope="col">Bucket</th><th scope="col">TAR files per hour</th><th scope="col">Configuration</th></tr></thead><tbody id="bucket-rows"><tr><td>data</td><td>256</td><td>Fixed at creation</td></tr></tbody></table></div>
+      <p id="bucket-status" class="status" role="status" aria-live="polite"></p>
+      <hr>
+      <h3 class="h5">Create a bucket</h3>
+      <p id="count-help">Choose the number of TAR files per hour once, when you create the bucket. This number cannot be changed later. Files are created as data arrives.</p>
+      <form id="create-bucket-form">
+        <div class="row">
+          <div class="form-group col-md-6"><label for="bucket-name">Bucket name</label><input class="form-control" id="bucket-name" name="name" required minlength="3" maxlength="63" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]" aria-describedby="name-help"><small id="name-help" class="form-text text-muted">3–63 lowercase letters, digits, or hyphens; start and end with a letter or digit.</small></div>
+          <div class="form-group col-md-6"><label for="tar-count">TAR files per hour</label><input class="form-control" id="tar-count" name="tar_files_per_hour" type="number" min="1" max="65536" step="1" value="4" required aria-describedby="count-help"></div>
+        </div>
+        <button class="btn btn-primary" type="submit">Create bucket</button>
+        <p id="create-status" class="status mt-3 mb-0" role="status" aria-live="polite"></p>
       </form>
-    </xmp>
-  </div>
+    </section>
 
-  <div class="shadow-none p-3 mb-5 bg-light rounded">
-    <b>RawUpload</b>
-    {id} must contain time-uuid
-    <xmp>
-      <form action="/rawupload/{id}" method="post">
-        <input type="file" />
-        <input type="submit" value="upload" />
+    <section id="upload" aria-labelledby="upload-heading">
+      <h2 class="h4" id="upload-heading">Upload files</h2>
+      <p>Generate a time UUID for each file, or use filenames that already contain a time UUID.</p>
+      <form enctype="multipart/form-data" action="/upload?newuuid=true" method="post" data-token="write">
+        <div class="form-group"><label for="upload-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="upload-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
+        <div class="form-group"><label for="upload-files">Files to archive</label><input class="form-control-file" type="file" name="file" id="upload-files" multiple required></div>
+        <input type="hidden" name="token"><input type="hidden" name="read_token">
+        <button type="submit" class="btn btn-primary">Upload and generate UUIDs</button>
       </form>
-    </xmp>
-  </div>
+      <details class="mt-4"><summary>Upload files with existing UUID filenames</summary>
+        <form enctype="multipart/form-data" action="/upload" method="post" data-token="write" class="mt-3">
+          <div class="form-group"><label for="named-upload-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="named-upload-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
+          <div class="form-group"><label for="named-upload-files">Files with time UUID filenames</label><input class="form-control-file" type="file" name="file" id="named-upload-files" multiple required aria-describedby="uuid-help"><small class="form-text text-muted" id="uuid-help">Use a UUID v1 or a timestamped UUID v4, such as 20261107-1036-40f1-b34f-02d7517a01d3.</small></div>
+          <input type="hidden" name="token"><input type="hidden" name="read_token">
+          <button type="submit" class="btn btn-outline-primary">Upload with existing UUIDs</button>
+        </form>
+      </details>
+    </section>
 
+    <section id="retrieve" aria-labelledby="retrieve-heading">
+      <h2 class="h4" id="retrieve-heading">Browse and download</h2>
+      <form action="/files/" method="get" data-token="read" class="mb-4">
+        <div class="form-group"><label for="browse-bucket">Bucket to browse</label><select class="form-control bucket-select" name="bucket" id="browse-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
+        <input type="hidden" name="token"><button type="submit" class="btn btn-outline-primary">Browse archive files</button>
+      </form>
+      <hr>
+      <form action="/redirect" method="get" data-token="read" class="mt-4">
+        <div class="form-group"><label for="download-bucket">Bucket containing the file</label><select class="form-control bucket-select" name="bucket" id="download-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
+        <div class="form-group"><label for="download-uuid">File UUID</label><input class="form-control" type="text" name="file" id="download-uuid" required></div>
+        <input type="hidden" name="token"><button type="submit" class="btn btn-primary">Download file</button>
+      </form>
+      <details class="mt-4"><summary>Generate an example time UUID</summary>
+        <form action="/uuid" method="get" data-token="read" class="mt-3">
+          <div class="form-group"><label for="uuid-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="uuid-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
+          <input type="hidden" name="token"><button type="submit" class="btn btn-outline-secondary">Generate UUID v4</button><button type="submit" formaction="/uuidv1" class="btn btn-outline-secondary">Generate UUID v1</button>
+        </form>
+      </details>
+    </section>
+    <section aria-labelledby="api-heading"><h2 class="h4" id="api-heading">HTTP API</h2><p>Upload raw bytes with <code>POST /buckets/{bucket}/rawupload/{uuid}</code>, or download with <code>GET /buckets/{bucket}/get/{uuid}</code>. Send the matching token as <code>Authorization: Bearer &lt;token&gt;</code>. Endpoints without a bucket selection use the default <code>data</code> bucket.</p></section>
+  </main>
+  <script>
+    (() => {
+      const readToken = document.getElementById('read-token');
+      const writeToken = document.getElementById('write-token');
+      const bucketStatus = document.getElementById('bucket-status');
+      const createStatus = document.getElementById('create-status');
+      const refreshButton = document.getElementById('refresh-buckets');
+      let buckets = [{name: 'data', tar_files_per_hour: 256}];
+
+      function tokenHeaders(token) {
+        return token ? {Authorization: `Bearer ${token}`} : {};
+      }
+      function showStatus(element, message, failed = false) {
+        element.textContent = message;
+        element.classList.toggle('text-danger', failed);
+      }
+      async function requestJSON(url, options) {
+        const response = await fetch(url, options);
+        const text = await response.text();
+        let result;
+        try { result = JSON.parse(text); } catch { result = null; }
+        if (!response.ok) throw new Error((result && (result.error || result.message)) || text.trim() || `Request failed (${response.status})`);
+        return result;
+      }
+      function renderBuckets(selectedName) {
+        const rows = document.getElementById('bucket-rows');
+        rows.replaceChildren();
+        for (const item of buckets) {
+          const row = document.createElement('tr');
+          for (const value of [item.name, item.tar_files_per_hour, 'Fixed at creation']) {
+            const cell = document.createElement('td');
+            cell.textContent = String(value);
+            row.append(cell);
+          }
+          rows.append(row);
+        }
+        document.querySelectorAll('.bucket-select').forEach(select => {
+          const previous = selectedName || select.value;
+          select.replaceChildren();
+          for (const item of buckets) {
+            const option = document.createElement('option');
+            option.value = item.name;
+            option.textContent = `${item.name} (${item.tar_files_per_hour} TAR files/hour)`;
+            select.append(option);
+          }
+          select.value = buckets.some(item => item.name === previous) ? previous : 'data';
+        });
+      }
+      async function refreshBuckets() {
+        refreshButton.disabled = true;
+        showStatus(bucketStatus, 'Loading buckets…');
+        try {
+          const result = await requestJSON('/buckets', {headers: tokenHeaders(readToken.value)});
+          if (!Array.isArray(result)) throw new Error('The server returned an invalid bucket list.');
+          buckets = result;
+          renderBuckets();
+          showStatus(bucketStatus, `${buckets.length} bucket${buckets.length === 1 ? '' : 's'} available.`);
+        } catch (error) {
+          showStatus(bucketStatus, `${error.message} Enter the read token above, then refresh.`, true);
+        } finally {
+          refreshButton.disabled = false;
+        }
+      }
+      refreshButton.addEventListener('click', refreshBuckets);
+      document.getElementById('create-bucket-form').addEventListener('submit', async event => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const button = form.querySelector('button[type="submit"]');
+        button.disabled = true;
+        showStatus(createStatus, 'Creating bucket…');
+        try {
+          const name = document.getElementById('bucket-name').value;
+          const count = Number(document.getElementById('tar-count').value);
+          const created = await requestJSON('/buckets', {method: 'POST', headers: {...tokenHeaders(writeToken.value), 'Content-Type': 'application/json'}, body: JSON.stringify({name, tar_files_per_hour: count})});
+          if (!created || typeof created.name !== 'string') throw new Error('The server returned an invalid bucket configuration.');
+          buckets = [...buckets.filter(item => item.name !== created.name), created].sort((a, b) => a.name.localeCompare(b.name));
+          renderBuckets(created.name);
+          showStatus(createStatus, `Created ${created.name} with ${created.tar_files_per_hour} TAR files per hour. This configuration is fixed.`);
+          document.getElementById('bucket-name').value = '';
+        } catch (error) {
+          showStatus(createStatus, error.message, true);
+        } finally {
+          button.disabled = false;
+        }
+      });
+      document.querySelectorAll('form[data-token]').forEach(form => {
+        form.addEventListener('submit', () => {
+          form.elements.token.value = form.dataset.token === 'write' ? writeToken.value : readToken.value;
+          if (form.elements.read_token) form.elements.read_token.value = readToken.value;
+        });
+      });
+      refreshBuckets();
+    })();
+  </script>
 </body>
-
 </html>

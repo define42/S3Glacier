@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"glacier/bucket"
 	"glacier/config"
 	"glacier/prometheus"
 	"io"
@@ -25,8 +27,6 @@ import (
 	"github.com/linkedin/goavro"
 )
 
-var ctx = context.Background()
-
 func ExtractGUID() *regexp.Regexp {
 	r, err := regexp.Compile("([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})")
 	if err != nil {
@@ -37,50 +37,37 @@ func ExtractGUID() *regexp.Regexp {
 
 var extractGUID = ExtractGUID()
 
-func GetContainerFile(uuidString string) (string, string, error) {
+// GetBucketContainerFile resolves an object using the bucket's fixed shard count.
+func GetBucketContainerFile(b bucket.Bucket, uuidString string) (string, string, error) {
+	if b.TarFilesPerHour < 1 || b.TarFilesPerHour > bucket.MaxTarFilesPerHour {
+		return "", "", bucket.ErrInvalidTarFiles
+	}
 	timeUuid := extractGUID.FindString(uuidString)
 	id, err := uuid.Parse(timeUuid)
-
 	if err != nil {
 		return "", timeUuid, err
 	}
+	var timestamp time.Time
 	if id.Version() == 1 {
 		sec, nsec := id.Time().UnixTime()
-		timestamp := time.Unix(sec, nsec).UTC()
-
-		idString := timestamp.Format("200601021504")
-		return "files/" + idString[0:4] + "/" + idString[4:6] + "/" + idString[6:8] + "/" + idString[8:10] + "/" + timeUuid[4:6] + ".tar", timeUuid, err
-	}
-
-	if id.Version() != 4 {
-		return "", timeUuid, errors.New("UUID not version 4")
-	}
-	if timeUuid[0:2] != "20" {
-		return "", timeUuid, errors.New("UUID not time-uuid")
-	}
-
-	keep, err := strconv.ParseUint(timeUuid[11:13], 16, 64)
-	if err != nil {
-		keep = 0
-		fmt.Println("strconv.ParseUint:", err)
-	}
-	//fmt.Println("uint8:", uint8(keep))
-	if config.Settings.Get(config.EXTEND_LIFE_SUPPORT) == "true" && uint8(keep)&0x80 == 0x80 {
-		keep = uint64(uint8(keep) & 0x7f)
-		TimeLayout := "20060102"
-		timestamp, err := time.Parse(TimeLayout, timeUuid[0:8])
-		if err != nil {
-			return "", timeUuid, errors.New("UUID unable to pase timeUuid:" + timeUuid)
-		}
-		//fmt.Println(timestamp)
-		timestamp = timestamp.AddDate(0, int(keep), 0)
-		idString := timestamp.Format("20060102")
-		//fmt.Println(timestamp)
-		return "files/" + idString[0:4] + "/" + idString[4:6] + "/" + idString[6:8] + "/" + timeUuid[9:11] + "/" + timeUuid[34:36] + ".tar", timeUuid, err
+		timestamp = time.Unix(sec, nsec).UTC()
 	} else {
-		return "files/" + timeUuid[0:4] + "/" + timeUuid[4:6] + "/" + timeUuid[6:8] + "/" + timeUuid[9:11] + "/" + timeUuid[34:36] + ".tar", timeUuid, err
+		if id.Version() != 4 || timeUuid[:2] != "20" {
+			return "", timeUuid, errors.New("UUID must be version 1 or a timestamped version 4")
+		}
+		timestamp, err = time.Parse("2006010215", timeUuid[:8]+timeUuid[9:11])
+		if err != nil {
+			return "", timeUuid, fmt.Errorf("invalid UUID timestamp: %w", err)
+		}
+		keep, _ := strconv.ParseUint(timeUuid[11:13], 16, 8)
+		if config.Settings.Get(config.EXTEND_LIFE_SUPPORT) == "true" && keep&0x80 != 0 {
+			timestamp = timestamp.AddDate(0, int(keep&0x7f), 0)
+		}
 	}
-
+	hash := sha256.Sum256(id[:])
+	index := binary.BigEndian.Uint64(hash[:8]) % uint64(b.TarFilesPerHour)
+	shard := fmt.Sprintf("%04x", index)
+	return filepath.Join(b.Path, timestamp.Format("2006/01/02/15"), shard+".tar"), timeUuid, nil
 }
 
 func GetFileTime(uuidString string) time.Time {
@@ -146,41 +133,23 @@ func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
 	return nil
 }
 
-func GetFile(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	vars := mux.Vars(r)
-	id, ok := vars["id"]
-	if !ok {
-		fmt.Println("id is missing in parameters")
-	}
-	fmt.Println(id)
-	token, ok := vars["token"]
-	if !ok {
-		fmt.Println("token is missing in parameters")
-	}
-	query := r.URL.Query()
-
-	// Access individual query parameters
-	parse := query.Get("parse")
-	fmt.Println(parse)
-
-	fmt.Println(token)
-	if config.Settings.Has(config.READ_TOKEN) && token != config.Settings.Get(config.READ_TOKEN) {
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintln(w, "Access forbidden")
+// GetBucketFile serves an object after the caller has authorized bucket access.
+func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
+	id := mux.Vars(r)["id"]
+	parse := r.URL.Query().Get("parse")
+	containerFile, id, err := GetBucketContainerFile(b, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	containerFile, id, err := GetContainerFile(id)
+	fileLock := flock.New(containerFile, flock.SetFlag(os.O_RDONLY))
+	defer fileLock.Close()
+	locked, err := fileLock.TryRLockContext(r.Context(), 50*time.Millisecond)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintln(w, err)
-		fmt.Println(err)
-		return
-	}
-	fileLock := flock.New(containerFile)
-	locked, err := fileLock.TryLockContext(ctx, 500*time.Millisecond)
-	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintln(w, err)
 		fmt.Println("lock timeout:", err)
@@ -216,6 +185,17 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 		if id == hdr.Name {
 			if len(hdr.Gname) > 0 {
 				w.Header().Set("Content-Type", hdr.Gname)
+			}
+			if parse == "" {
+				size := hdr.Size
+				if hdr.Mode == 1 {
+					size = int64(hdr.Uid)
+				}
+				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			}
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
 			}
 			if hdr.Mode == int64(1) {
 				gzf, err := gzip.NewReader(tr)
@@ -262,14 +242,9 @@ func GetFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func SharedUpload(r *http.Request, token string, id string, fileBytes []byte) (string, string, error) {
-
-	if config.Settings.Has(config.WRITE_TOKEN) && token != config.Settings.Get(config.WRITE_TOKEN) {
-
-		return "", "", fmt.Errorf("Access denied")
-	}
-
-	containerFile, uuid_id, err := GetContainerFile(id)
+// UploadToBucket stores an object after the caller has authorized bucket access.
+func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byte) (string, string, error) {
+	containerFile, uuid_id, err := GetBucketContainerFile(b, id)
 	if err != nil {
 		fmt.Println(err)
 		return "", "", err
@@ -283,10 +258,6 @@ func SharedUpload(r *http.Request, token string, id string, fileBytes []byte) (s
 		return "", "", err
 	}
 
-	if len(fileBytes) == 0 {
-		fmt.Println("FileSize==0")
-		return "", "", err
-	}
 	mtype := mimetype.Detect(fileBytes)
 	doCompress := false
 	if len(fileBytes) > 100 { // Pointless compressing small blobs as GZIP-header will create big overhead
@@ -313,14 +284,15 @@ func SharedUpload(r *http.Request, token string, id string, fileBytes []byte) (s
 	}
 
 	fileLock := flock.New(containerFile)
-	locked, err := fileLock.TryLockContext(ctx, 500*time.Millisecond)
+	defer fileLock.Close()
+	locked, err := fileLock.TryLockContext(r.Context(), 50*time.Millisecond)
 	if err != nil {
 		fmt.Println("lock timeout:", err)
 		return "", "", err
 	}
 	if !locked {
 		fmt.Println("file not locked:")
-		return "", "", err
+		return "", "", errors.New("archive lock was not acquired")
 	}
 	defer fileLock.Unlock()
 
@@ -338,7 +310,7 @@ func SharedUpload(r *http.Request, token string, id string, fileBytes []byte) (s
 	}
 	if fi.Size() > 0 {
 		if _, err = f.Seek(-2<<9, os.SEEK_END); err != nil {
-			fmt.Println(err)
+			return "", "", err
 		}
 	}
 
@@ -389,7 +361,7 @@ func SharedUpload(r *http.Request, token string, id string, fileBytes []byte) (s
 	}
 	prometheus.RawUploadDoneProcessed.Inc()
 	//	fmt.Fprintf(w, "<html><a href=get/%v>%v</a> <br><a href=%v>%v</a>", id, id, containerFile, containerFile)
-	return id, containerFile, nil
+	return uuid_id, containerFile, nil
 }
 
 func GenerateTimeUUID() string {

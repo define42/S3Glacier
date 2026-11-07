@@ -7,20 +7,19 @@ COPY go.sum go.sum
 RUN go mod download
 
 COPY config/ config/
+COPY bucket/ bucket/
 COPY autoclean/ autoclean/
 COPY prometheus/ prometheus/
-COPY acme.go acme.go
-COPY main_test.go main_test.go
-COPY main.go main.go
+COPY *.go ./
 COPY s3/ s3/
 COPY gui/ gui/
 COPY shared/ shared/
-RUN CGO_ENABLED=0 go test
+COPY static/ static/
+RUN CGO_ENABLED=0 go test ./...
 RUN CGO_ENABLED=0 go build -o /main
 RUN chmod 777 /main
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY static /static
 COPY --from=builder /main /main
 ENTRYPOINT ["/main"]

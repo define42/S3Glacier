@@ -2,133 +2,174 @@ package autoclean
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"time"
-	"github.com/shirou/gopsutil/disk"
-	"regexp"
 	"glacier/config"
 	"glacier/prometheus"
-	"github.com/gofrs/flock"
-)
+	"io/fs"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/gofrs/flock"
+	"github.com/shirou/gopsutil/disk"
+)
 
 func getDiskUsageAllowed() float64 {
 	allowedDiskEnv, err := strconv.ParseFloat(os.Getenv("DISK_USAGE_ALLOWED"), 64)
 	if err != nil {
 		allowedDiskEnv = 75
 	}
-	if allowedDiskEnv < 5 || allowedDiskEnv > 99 {
-		fmt.Println("Panic! DISK_USAGE_ALLOWED not accepted. Only 5-99 is allowed")
+	if math.IsNaN(allowedDiskEnv) || allowedDiskEnv < 5 || allowedDiskEnv > 99 {
+		fmt.Println("DISK_USAGE_ALLOWED not accepted. Only 5-99 is allowed; using 75")
 		allowedDiskEnv = 75
 	}
-	//fmt.Println("DISK_USAGE_ALLOWED:", allowedDiskEnv, "%")
 	return allowedDiskEnv
 }
 
 var DiskUsageAllowed = getDiskUsageAllowed()
 
-
-var ctx = context.Background()
-
-func ExtractDateFromFolder() *regexp.Regexp {
-        r, err := regexp.Compile("([0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9]{2})")
-        if err != nil {
-                panic(err)
-        }
-        return r
+type archiveCandidate struct {
+	path string
+	hour time.Time
 }
 
-var extractDateFromFolder = ExtractDateFromFolder()
-
-var current_data_time_window_function = func(pathX string, infoX os.DirEntry, errX error) error {
-
-	if errX != nil {
-		fmt.Printf("current_data_time_window_function: error 「%v」 at a path 「%q」\n", errX, pathX)
-		return errX
+// archiveHour accepts only the bucket archive layout.
+// Paths are relative to DATA_FOLDER, so metadata and unrelated tar files cannot
+// become cleanup candidates merely by containing a date somewhere in the path.
+func archiveHour(relative string) (time.Time, bool) {
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	if len(parts) != 7 || parts[0] != "buckets" || parts[1] == "" {
+		return time.Time{}, false
 	}
+	parts = parts[2:]
+	if len(parts) != 5 || len(parts[4]) <= len(".tar") || filepath.Ext(parts[4]) != ".tar" {
+		return time.Time{}, false
+	}
+	date := strings.Join(parts[:4], "/")
+	hour, err := time.Parse("2006/01/02/15", date)
+	if err != nil || hour.Format("2006/01/02/15") != date {
+		return time.Time{}, false
+	}
+	return hour, true
+}
 
-	if !infoX.IsDir() {
-		if filepath.Ext(pathX) == ".tar" {
-			myDate, err := time.Parse("2006/01/02/15", extractDateFromFolder.FindString(pathX))
-			if err != nil {
-				fmt.Println("Error-current_data_time_window_function:", err)
-				return errors.New("STOP")
-			}
-			prometheus.Current_data_window_in_hours.Set(time.Since(myDate).Hours())
-			return errors.New("STOP")
+func collectArchives(root string) ([]archiveCandidate, error) {
+	var candidates []archiveCandidate
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-	}
-
-	return nil
-}
-
-var autoCleanFunction = func(pathX string, infoX os.DirEntry, errX error) error {
-	usageStat, err := disk.UsageWithContext(ctx, config.Settings.Get(config.DATA_FOLDER))
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if relative != "." && strings.Split(filepath.ToSlash(relative), "/")[0] != "buckets" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		hour, ok := archiveHour(relative)
+		if !ok || !entry.Type().IsRegular() {
+			return nil
+		}
+		candidates = append(candidates, archiveCandidate{path: path, hour: hour})
+		return nil
+	})
 	if err != nil {
-		fmt.Println("Panic! Disk usage not working err:", err)
-		return filepath.SkipDir
+		return nil, err
 	}
+	// Bucket names must not affect retention: evict the oldest hour across all
+	// buckets, using the full path only to make ties deterministic.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].hour.Equal(candidates[j].hour) {
+			return candidates[i].path < candidates[j].path
+		}
+		return candidates[i].hour.Before(candidates[j].hour)
+	})
+	return candidates, nil
+}
 
-	if usageStat.UsedPercent < DiskUsageAllowed {
-		return filepath.SkipDir
+func removeArchive(path string) (bool, error) {
+	// Do not create a file if another cleanup pass removed it after the scan.
+	fileLock := flock.New(path, flock.SetFlag(os.O_RDWR))
+	defer fileLock.Close()
+	locked, err := fileLock.TryLock()
+	if err != nil || !locked {
+		return false, err
 	}
-
-	if errX != nil {
-		fmt.Printf("autoCleanFunction: error 「%v」 at a path 「%q」\n", errX, pathX)
-		return errX
+	if err := os.Remove(path); err != nil {
+		return false, err
 	}
+	return true, nil
+}
 
-	if !infoX.IsDir() {
-		if filepath.Ext(pathX) == ".tar" {
-			fileLock := flock.New(pathX)
-			locked, err := fileLock.TryLockContext(ctx, 500*time.Millisecond)
-			if err != nil {
-				fmt.Println("lock timeout:", err)
-				return filepath.SkipDir
-			}
-			if !locked {
-				fmt.Println("file not locked:")
-				return filepath.SkipDir
-			}
-			defer fileLock.Unlock()
-
-			err = os.Remove(pathX)
-			fmt.Printf("AutoDelete: %v DeleteWhen: %v<%v\r\n", pathX, usageStat.UsedPercent, DiskUsageAllowed)
-			if err != nil {
-				fmt.Println("Remove file error: ", err)
-			}
-
+func cleanupArchives(candidates []archiveCandidate, allowed float64, diskUsage func() (float64, error)) ([]archiveCandidate, error) {
+	retained := make([]archiveCandidate, 0, len(candidates))
+	for i, candidate := range candidates {
+		used, err := diskUsage()
+		if err != nil {
+			// Without a fresh measurement, leave every remaining archive intact.
+			return append(retained, candidates[i:]...), err
+		}
+		if math.IsNaN(used) || math.IsInf(used, 0) || used < 0 || used > 100 {
+			return append(retained, candidates[i:]...), fmt.Errorf("invalid disk usage: %v", used)
+		}
+		if used <= allowed {
+			return append(retained, candidates[i:]...), nil
+		}
+		removed, err := removeArchive(candidate.path)
+		if err != nil {
+			fmt.Printf("Cleanup skipped %q: %v\n", candidate.path, err)
+		}
+		if removed {
+			fmt.Printf("AutoDelete: %v disk usage %.2f%% > %.2f%%\n", candidate.path, used, allowed)
+		} else {
+			retained = append(retained, candidate)
 		}
 	}
+	return retained, nil
+}
 
-	return nil
+func dataWindowHours(candidates []archiveCandidate, now time.Time) float64 {
+	if len(candidates) == 0 {
+		return 0
+	}
+	hours := now.Sub(candidates[0].hour).Hours()
+	if hours < 0 {
+		return 0
+	}
+	return hours
+}
+
+func runCleanup(root string, allowed float64, diskUsage func() (float64, error), now time.Time) error {
+	candidates, err := collectArchives(root)
+	if err != nil {
+		return err
+	}
+	retained, err := cleanupArchives(candidates, allowed, diskUsage)
+	prometheus.Current_data_window_in_hours.Set(dataWindowHours(retained, now))
+	return err
 }
 
 func AutoClean() {
 	fmt.Println("AutoClean start")
 	for {
-		filepath.WalkDir(config.Settings.Get(config.DATA_FOLDER), current_data_time_window_function)
-		time.Sleep(10000 * time.Millisecond)
-		usageStat, err := disk.UsageWithContext(ctx, config.Settings.Get(config.DATA_FOLDER))
-		if err != nil {
-			fmt.Println("Panic! Disk usage not working err:", err)
-		}
-
-		if usageStat.UsedPercent > DiskUsageAllowed {
-			fmt.Println("Start autoClean:", usageStat.UsedPercent)
-			fmt.Printf("Start AutoClean DeleteWhen: %v<%v\r\n", usageStat.UsedPercent, DiskUsageAllowed)
-			err := filepath.WalkDir(config.Settings.Get(config.DATA_FOLDER), autoCleanFunction)
-
+		root := config.Settings.Get(config.DATA_FOLDER)
+		diskUsage := func() (float64, error) {
+			usage, err := disk.UsageWithContext(context.Background(), root)
 			if err != nil {
-				fmt.Printf("error walking the path %q: %v\n", config.Settings.Get(config.DATA_FOLDER), err)
+				return 0, err
 			}
+			return usage.UsedPercent, nil
 		}
-
+		if err := runCleanup(root, DiskUsageAllowed, diskUsage, time.Now()); err != nil {
+			fmt.Printf("Cleanup failed for %q: %v\n", root, err)
+		}
+		time.Sleep(10 * time.Second)
 	}
-
 }
-

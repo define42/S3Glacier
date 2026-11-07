@@ -2,116 +2,41 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"fmt"
+	"embed"
 	"glacier/autoclean"
+	"glacier/bucket"
 	"glacier/config"
 	"glacier/gui"
 	"glacier/prometheus"
 	"glacier/s3"
-	"glacier/shared"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var ctx = context.Background()
+//go:embed static
+var assets embed.FS
 
-func rawUpload(w http.ResponseWriter, r *http.Request) {
-	prometheus.RawUploadProcessed.Inc()
-	vars := mux.Vars(r)
-	id, ok := vars["id"]
-	if !ok {
-		fmt.Println("id is missing in parameters")
-	}
-	token, ok := vars["token"]
-	if !ok {
-		fmt.Println("token is missing in parameters")
-	}
-	fmt.Println(token)
-	if config.Settings.Has(config.WRITE_TOKEN) && token != config.Settings.Get(config.WRITE_TOKEN) {
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintln(w, "Access forbidden")
-		return
-	}
-	fileBytes, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintln(w, err)
-		return
-	}
-	defer r.Body.Close()
-	id, containerFile, err := shared.SharedUpload(r, token, id, fileBytes)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprintln(w, err)
-	}
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "<html><a href=get/%v>%v</a> <br><a href=%v>%v</a>", id, id, containerFile, containerFile)
-}
-
-func uploadFile(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("uploadFile")
-	defer r.Body.Close()
-	r.ParseMultipartForm(10 << 30)
-	tokenList := r.MultipartForm.Value["token"]
-	token := ""
-	if len(tokenList) > 0 {
-		token = tokenList[0]
-	}
-	fmt.Println(token)
-
-	files := r.MultipartForm.File["file"]
-	savedList := make(map[string]string)
-	for _, fileHeader := range files {
-
-		//file, handler, err := r.FormFile("file")
-		file, err := fileHeader.Open()
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintln(w, "Error Retrieving the File")
-			fmt.Fprintln(w, err)
-			fmt.Println("Error Retrieving the File", err)
-			return
-		}
-		defer file.Close()
-
-		fileUUID := fileHeader.Filename
-		generateNewUUID := r.URL.Query().Get("newuuid")
-		if generateNewUUID != "" {
-			fileUUID = shared.GenerateTimeUUID()
-		}
-		fileBytes, err := ioutil.ReadAll(file)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintln(w, err)
-			return
-		}
-		id, containerFile, err := shared.SharedUpload(r, token, fileUUID, fileBytes)
-		savedList[id] = containerFile
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintln(w, err)
-			return
-		}
-	}
-	if len(savedList) > 0 {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "<html><table border=1><tr><th>UUID</th><th>TAR File</th></tr>")
-		for key, value := range savedList {
-			fmt.Fprintf(w, "<tr><td><a href=get/%v>%v</a></td><td><a href=%v>%v</a></td></tr>", key, key, value, value)
-		}
-		fmt.Fprintf(w, "</table>")
-	}
-}
-
+// InitServer retains the existing entry point for callers that expect a router.
 func InitServer() *mux.Router {
+	r, err := NewServer()
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+// NewServer loads immutable bucket definitions before accepting requests.
+func NewServer() (*mux.Router, error) {
 	config.Settings.Init()
+	store, err := bucket.Open(config.Settings.Get(config.DATA_FOLDER))
+	if err != nil {
+		return nil, err
+	}
+	s3.ResetS3Users()
 
 	s3WriteToken := config.Settings.Get(config.S3_READ_WRITE_USERS)
 	s3.AddS3UserWrite(s3WriteToken)
@@ -133,45 +58,51 @@ func InitServer() *mux.Router {
 	}
 	mimetype.Extend(avroDetector, "application/avro", ".avro")
 
-	err := os.MkdirAll(config.Settings.Get(config.DATA_FOLDER), 0700)
-	if err != nil {
-		fmt.Println(err)
-		log.Fatal("Panic unable to create folder:", config.Settings.Get(config.DATA_FOLDER))
-	}
 	r := mux.NewRouter()
-	filesfs := http.StripPrefix("/files/", http.FileServer(http.Dir(config.Settings.Get(config.DATA_FOLDER))))
-	r.PathPrefix("/files/").Handler(gui.FileView(filesfs))
-	staticfs := http.StripPrefix("/static/", http.FileServer(http.Dir("/static")))
-	r.PathPrefix("/static/").Handler(staticfs)
-
+	r.PathPrefix("/static/").Handler(http.FileServer(http.FS(assets)))
+	r.Handle("/", s3.S3Security(s3.ListBuckets(store))).HeadersRegexp("Authorization", "^AWS ").Methods(http.MethodGet)
 	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, assets, "static/index.html")
+	}).Methods(http.MethodGet)
 
-		http.ServeFile(w, r, "/static/index.html")
-	})
+	r.HandleFunc("/buckets", manageBuckets(store))
+	r.HandleFunc("/buckets/{bucket}", inspectBucket(store))
+	r.HandleFunc("/buckets/{bucket}/upload", uploadFile(store)).Methods(http.MethodPost)
+	r.HandleFunc("/buckets/{bucket}/rawupload/{id}", rawUpload(store)).Methods(http.MethodPut, http.MethodPost)
+	r.HandleFunc("/buckets/{bucket}/get/{id}", downloadFile(store)).Methods(http.MethodGet, http.MethodHead)
+	r.Handle("/buckets/{bucket}/files/{path:.*}", gui.FileView(store)).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/buckets/{bucket}/files", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path+"/"+querySuffix(r), http.StatusTemporaryRedirect)
+	}).Methods(http.MethodGet)
 
-	r.HandleFunc("/uuid", gui.Uuidhello)
-	r.HandleFunc("/uuidv1", gui.Uuidv1hello)
-	r.Handle("/data/", s3.S3Security(s3.S3Bucket))
-	r.HandleFunc("/upload", uploadFile)
-	r.HandleFunc("/rawupload/{id}", rawUpload)
-	r.HandleFunc("/rawupload/{token}/{id}", rawUpload)
-	r.HandleFunc("/get/{id}", shared.GetFile)
-	r.HandleFunc("/get/{token}/{id}", shared.GetFile)
-	r.HandleFunc("/redirect", gui.Redirect)
-	r.Handle("/data/{id}", s3.S3Security(s3.S3Handler))
-	r.Handle("/{token}/{id}", s3.S3Security(s3.S3Handler))
+	r.Handle("/files/{path:.*}", gui.FileView(store)).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/uuid", gui.Uuidhello(store)).Methods(http.MethodGet)
+	r.HandleFunc("/uuidv1", gui.Uuidv1hello(store)).Methods(http.MethodGet)
+	r.HandleFunc("/upload", uploadFile(store)).Methods(http.MethodPost)
+	r.HandleFunc("/rawupload/{id}", rawUpload(store)).Methods(http.MethodPut, http.MethodPost)
+	r.HandleFunc("/rawupload/{token}/{id}", rawUpload(store)).Methods(http.MethodPut, http.MethodPost)
+	r.HandleFunc("/get/{id}", downloadFile(store)).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/get/{token}/{id}", downloadFile(store)).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/redirect", gui.Redirect).Methods(http.MethodGet)
 	r.Handle("/metrics", promhttp.Handler())
-	return r
+
+	r.Handle("/{bucket}", s3.S3Security(s3.BucketHandler(store)))
+	r.Handle("/{bucket}/", s3.S3Security(s3.BucketHandler(store)))
+	r.Handle("/{bucket}/{id}", s3.S3Security(s3.ObjectHandler(store)))
+	return r, nil
 }
 
 func main() {
-	r := InitServer()
+	r, err := NewServer()
+	if err != nil {
+		log.Fatal(err)
+	}
 	go autoclean.AutoClean()
 	go prometheus.SystemStat()
 
 	if config.Settings.Has(config.SERVER_DOMAIN) && config.Settings.Has(config.ACME_SERVER) {
 		log.Fatal(HTTPSACME([]string{config.Settings.Get(config.SERVER_DOMAIN)}, r, config.Settings.Get(config.ACME_SERVER)))
 	} else {
-		http.ListenAndServe(":"+config.Settings.Get(config.SERVER_PORT), r)
+		log.Fatal(http.ListenAndServe(":"+config.Settings.Get(config.SERVER_PORT), r))
 	}
 }
