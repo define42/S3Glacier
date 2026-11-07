@@ -31,6 +31,9 @@ func getDiskUsageAllowed() float64 {
 	return allowedDiskEnv
 }
 
+// DiskUsageAllowed is the shared disk usage threshold in percent, read from
+// DISK_USAGE_ALLOWED at package initialization. Values outside 5 through 99 or
+// invalid values fall back to 75; changing the environment later has no effect.
 var DiskUsageAllowed = getDiskUsageAllowed()
 
 type archiveCandidate struct {
@@ -158,6 +161,10 @@ func runCleanup(root string, allowed float64, diskUsage func() (float64, error),
 	return err
 }
 
+// AutoClean runs disk-pressure cleanup until the process exits. Each pass scans
+// all buckets and removes the oldest unlocked archives until fresh disk usage
+// is at or below DiskUsageAllowed. Busy archives are skipped, errors are logged,
+// and the next pass starts after a ten-second pause. Call it in a goroutine.
 func AutoClean() {
 	fmt.Println("AutoClean start")
 	for {

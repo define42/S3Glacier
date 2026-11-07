@@ -22,6 +22,8 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// MyUUID is the UUID handlers' JSON response, including the selected bucket's
+// fixed archive count and the resolved filesystem path in ContainerFile.
 type MyUUID struct {
 	Uuid            string
 	ContainerFile   string
@@ -29,12 +31,16 @@ type MyUUID struct {
 	TarFilesPerHour int
 }
 
+// Uuidhello returns a read-authorized handler that generates a timestamped
+// UUIDv4 and its predicted archive path in the requested bucket.
 func Uuidhello(store *bucket.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeUUID(store, w, r, shared.GenerateTimeUUID())
 	}
 }
 
+// Uuidv1hello returns a read-authorized handler that generates a UUIDv1 and its
+// predicted archive path in the requested bucket. Generation failures return 500.
 func Uuidv1hello(store *bucket.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, err := uuid.NewUUID()
@@ -64,6 +70,9 @@ func writeUUID(store *bucket.Store, w http.ResponseWriter, r *http.Request, id s
 	json.NewEncoder(w).Encode(MyUUID{Uuid: id, ContainerFile: container, Bucket: b.Name, TarFilesPerHour: b.TarFilesPerHour})
 }
 
+// Redirect authorizes reading and redirects the file query parameter to the
+// selected bucket's download URL, preserving the read token. A missing file
+// parameter returns 400; bucket and object existence are checked by the target.
 func Redirect(w http.ResponseWriter, r *http.Request) {
 	if !shared.AuthorizeRead(w, r) {
 		return
@@ -120,6 +129,8 @@ var browseTemplate = template.Must(template.New("browse").Parse(`<!doctype html>
 
 // FileView exposes only a bucket's dated archive tree, never its configuration
 // files or another bucket's storage directory.
+// It enforces the HTTP read token, rejects symbolic links, and acquires a shared
+// archive lock before listing entries or serving ?download=1 as a raw TAR file.
 func FileView(store *bucket.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !shared.AuthorizeRead(w, r) {

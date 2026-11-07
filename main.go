@@ -20,7 +20,9 @@ import (
 //go:embed static
 var assets embed.FS
 
-// InitServer retains the existing entry point for callers that expect a router.
+// InitServer constructs a router with NewServer and panics if startup fails.
+// Use NewServer when bucket configuration or filesystem errors must be handled
+// without a panic. It does not start listeners or background jobs.
 func InitServer() *mux.Router {
 	r, err := NewServer()
 	if err != nil {
@@ -29,7 +31,13 @@ func InitServer() *mux.Router {
 	return r
 }
 
-// NewServer loads immutable bucket definitions before accepting requests.
+// NewServer loads environment settings and immutable bucket definitions, then
+// constructs the browser, HTTP, S3, and metrics routes. It returns an error if
+// the data root or persisted bucket definitions cannot be opened.
+//
+// It does not start listeners, cleanup, or metrics polling. Initialization
+// updates process-global settings, credentials, and MIME detectors, so callers
+// must not invoke it concurrently with a running server.
 func NewServer() (*mux.Router, error) {
 	config.Settings.Init()
 	store, err := bucket.Open(config.Settings.Get(config.DATA_FOLDER))

@@ -33,6 +33,7 @@ type verifiedPayload struct {
 	data []byte
 }
 
+// Close satisfies io.ReadCloser; the verified payload has no external resources.
 func (*verifiedPayload) Close() error { return nil }
 
 func readS3Body(r *http.Request) ([]byte, error) {
@@ -42,9 +43,11 @@ func readS3Body(r *http.Request) ([]byte, error) {
 	return io.ReadAll(r.Body)
 }
 
-// VerifyV4Payload verifies the entire payload before a handler can mutate a
-// bucket or archive. Streaming framing is removed before bytes reach storage.
-// Like the archive upload handler, this buffers one complete decoded object.
+// VerifyV4Payload checks a body using signing information already authenticated
+// by S3Security. It closes the original body, removes supported aws-chunked
+// framing, and replaces Body and ContentLength with the verified decoded object.
+// Uploads are buffered in memory; GET and HEAD reject nonempty bodies. Integrity
+// and framing failures return a V4Error before a handler can write to storage.
 func VerifyV4Payload(r *http.Request, info *V4SigningInfo) error {
 	if r.Body == nil {
 		r.Body = http.NoBody

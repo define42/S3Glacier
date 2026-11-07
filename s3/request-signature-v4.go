@@ -23,7 +23,8 @@ const (
 )
 
 // V4SigningInfo contains verified request information used to authenticate its body.
-// SigningKey is scoped to this request's date, region, and S3 service.
+// SigningKey is scoped to this request's date, region, and S3 service. Treat it
+// as a secret; it is used by VerifyV4Payload and must not be logged or exposed.
 type V4SigningInfo struct {
 	SigningKey    []byte
 	Scope         string
@@ -42,11 +43,13 @@ type V4Error struct {
 	Message string
 }
 
+// Error returns the client-facing S3 authentication failure message.
 func (e *V4Error) Error() string { return e.Message }
 
 type v4InfoContextKey struct{}
 
-// V4Info returns signing information after S3Security has authenticated a V4 request.
+// V4Info returns signing information attached by S3Security for a V4 request.
+// The result is absent for V2 or requests that have not passed V4 authentication.
 func V4Info(r *http.Request) (*V4SigningInfo, bool) {
 	info, ok := r.Context().Value(v4InfoContextKey{}).(*V4SigningInfo)
 	return info, ok

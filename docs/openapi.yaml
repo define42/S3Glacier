@@ -1,0 +1,271 @@
+openapi: 3.1.0
+info:
+  title: S3 Glacier Bucket Management API
+  version: current
+  description: |
+    JSON bucket management only: /buckets and /buckets/{bucket}.
+    Raw uploads, downloads, browsing, UUID helpers, and the S3 subset are outside
+    this specification. See the [full HTTP and S3 API guide](api.md).
+
+    Successful bodies are JSON; errors are plain text. Buckets and their TAR
+    files-per-hour counts cannot be updated or deleted. The default data bucket
+    is created with 256 TAR files per hour.
+
+    Read and write tokens are independent. Bearer and query-token alternatives
+    are documented per operation. The empty security alternative applies only
+    when that operation's READ_TOKEN or WRITE_TOKEN is empty on the server.
+    S3 signatures do not authorize these endpoints.
+externalDocs:
+  description: Full HTTP and S3 API guide
+  url: api.md
+servers:
+  - url: /
+tags:
+  - name: Buckets
+    description: Inspect buckets and create immutable archive configurations.
+paths:
+  /buckets:
+    get:
+      tags: [Buckets]
+      operationId: listBuckets
+      summary: List bucket configurations
+      description: Returns every configured bucket, sorted by name. Requires READ_TOKEN when set.
+      security:
+        - readBearer: []
+        - readQueryToken: []
+        - {}
+      responses:
+        '200':
+          description: Bucket configurations.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bucket'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/CollectionMethodNotAllowed'
+    post:
+      tags: [Buckets]
+      operationId: createBucket
+      summary: Create a bucket with a fixed TAR count
+      description: |
+        Requires WRITE_TOKEN when set. The body must contain one JSON object,
+        be at most 16 KiB, and contain no unknown fields. The TAR count is
+        required and cannot be changed later. An existing name returns 409,
+        including when the requested count matches the stored count.
+      security:
+        - writeBearer: []
+        - writeQueryToken: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBucket'
+            example:
+              name: logs
+              tar_files_per_hour: 4
+      responses:
+        '201':
+          description: Bucket created.
+          headers:
+            Location:
+              description: Relative URL of the created bucket configuration.
+              schema:
+                type: string
+              example: /buckets/logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bucket'
+        '400':
+          description: Invalid JSON, unknown fields, an oversized body, invalid name, or invalid TAR count.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The name already exists and its configuration is immutable.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          $ref: '#/components/responses/CollectionMethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/StorageFailure'
+  /buckets/{bucket}:
+    parameters:
+      - name: bucket
+        in: path
+        required: true
+        description: Existing bucket name, including the default data bucket.
+        schema:
+          $ref: '#/components/schemas/BucketName'
+    get:
+      tags: [Buckets]
+      operationId: getBucket
+      summary: Inspect one bucket configuration
+      description: Requires READ_TOKEN when set.
+      security:
+        - readBearer: []
+        - readQueryToken: []
+        - {}
+      responses:
+        '200':
+          description: The bucket's immutable configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bucket'
+        '400':
+          description: The bucket name is invalid or reserved.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The bucket does not exist.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          $ref: '#/components/responses/ItemMethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/StorageFailure'
+    head:
+      tags: [Buckets]
+      operationId: headBucket
+      summary: Check whether a bucket exists
+      description: |
+        Requires READ_TOKEN when set. Returns status only, with no response body.
+        This management endpoint does not return the S3 TAR-count response header.
+      security:
+        - readBearer: []
+        - readQueryToken: []
+        - {}
+      responses:
+        '200':
+          description: The bucket exists.
+        '400':
+          description: The bucket name is invalid or reserved; no body.
+        '403':
+          description: The read token is missing or incorrect; no body.
+        '404':
+          description: The bucket does not exist; no body.
+        '405':
+          description: Unsupported method; allowed methods are GET and HEAD.
+          headers:
+            Allow:
+              schema:
+                type: string
+              example: GET, HEAD
+        '500':
+          description: Unable to inspect the bucket; no body.
+components:
+  securitySchemes:
+    readBearer:
+      type: http
+      scheme: bearer
+      description: The configured READ_TOKEN literal value.
+    writeBearer:
+      type: http
+      scheme: bearer
+      description: The configured WRITE_TOKEN literal value.
+    readQueryToken:
+      type: apiKey
+      in: query
+      name: token
+      description: READ_TOKEN as a URL parameter; the bearer header takes precedence.
+    writeQueryToken:
+      type: apiKey
+      in: query
+      name: token
+      description: WRITE_TOKEN as a URL parameter; the bearer header takes precedence.
+  schemas:
+    BucketName:
+      type: string
+      minLength: 3
+      maxLength: 63
+      pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+      not:
+        enum: [api, buckets, files, get, metrics, rawupload, redirect, static, upload, uuid, uuidv1]
+      description: |
+        Lowercase letters, digits, and hyphens, with alphanumeric ends.
+        Reserved names are api, buckets, files, get, metrics, rawupload,
+        redirect, static, upload, uuid, and uuidv1.
+      example: logs
+    TarFilesPerHour:
+      type: integer
+      minimum: 1
+      maximum: 65536
+      description: Immutable maximum hourly shard count; values need not be powers of two.
+      example: 4
+    CreateBucket:
+      type: object
+      additionalProperties: false
+      required: [name, tar_files_per_hour]
+      properties:
+        name:
+          $ref: '#/components/schemas/BucketName'
+        tar_files_per_hour:
+          $ref: '#/components/schemas/TarFilesPerHour'
+    Bucket:
+      type: object
+      additionalProperties: false
+      required: [name, tar_files_per_hour, created_at]
+      properties:
+        name:
+          $ref: '#/components/schemas/BucketName'
+        tar_files_per_hour:
+          $ref: '#/components/schemas/TarFilesPerHour'
+        created_at:
+          type: string
+          format: date-time
+          description: Time the bucket configuration was created.
+          example: '2026-11-07T12:00:00Z'
+  responses:
+    Forbidden:
+      description: The configured token for this operation is missing or incorrect.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: "Access forbidden\n"
+    CollectionMethodNotAllowed:
+      description: Unsupported method; this collection accepts GET and POST only.
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: GET, POST
+      content:
+        text/plain:
+          schema:
+            type: string
+    ItemMethodNotAllowed:
+      description: Bucket configurations cannot be updated or deleted; GET and HEAD only.
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: GET, HEAD
+      content:
+        text/plain:
+          schema:
+            type: string
+    StorageFailure:
+      description: The bucket configuration could not be stored or inspected.
+      content:
+        text/plain:
+          schema:
+            type: string

@@ -27,6 +27,8 @@ import (
 	"github.com/linkedin/goavro"
 )
 
+// ExtractGUID matches lowercase, hyphenated UUID substrings, including UUIDs
+// embedded in filenames. It does not validate the UUID version or timestamp.
 func ExtractGUID() *regexp.Regexp {
 	r, err := regexp.Compile("([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})")
 	if err != nil {
@@ -37,7 +39,21 @@ func ExtractGUID() *regexp.Regexp {
 
 var extractGUID = ExtractGUID()
 
-// GetBucketContainerFile resolves an object using the bucket's fixed shard count.
+// GetBucketContainerFile returns the archive path and first UUID substring in
+// uuidString without creating files. It accepts UUIDv1 timestamps in UTC or
+// timestamped UUIDv4 values whose first two groups encode YYYYMMDD-HHMM with a
+// year from 2000 through 2099. For v4, only the date and hour determine the folder;
+// ordinary minutes are ignored.
+//
+// When EXTEND_LIFE_SUPPORT is exactly "true", the last two characters of the
+// second group are interpreted as a hexadecimal byte. A set high bit adds the
+// remaining seven bits as calendar months using [time.Time.AddDate]. UUIDv1 is unaffected.
+// Changing this setting can change where an existing flagged UUID is found.
+//
+// The path is b.Path/YYYY/MM/DD/HH/shard.tar, with a four-digit hexadecimal shard
+// from SHA-256(UUID bytes), first eight bytes in big-endian order, modulo the
+// fixed bucket count. Invalid counts return bucket.ErrInvalidTarFiles; invalid
+// UUIDs, unsupported versions, and invalid v4 dates or hours return errors.
 func GetBucketContainerFile(b bucket.Bucket, uuidString string) (string, string, error) {
 	if b.TarFilesPerHour < 1 || b.TarFilesPerHour > bucket.MaxTarFilesPerHour {
 		return "", "", bucket.ErrInvalidTarFiles
@@ -70,6 +86,9 @@ func GetBucketContainerFile(b bucket.Bucket, uuidString string) (string, string,
 	return filepath.Join(b.Path, timestamp.Format("2006/01/02/15"), shard+".tar"), timeUuid, nil
 }
 
+// GetFileTime supplies the S3 Last-Modified value: UTC midnight of a timestamped
+// UUIDv4's date, or the current time for UUIDv1 and invalid inputs. It ignores the
+// hour and EXTEND_LIFE_SUPPORT and must not be used to locate stored objects.
 func GetFileTime(uuidString string) time.Time {
 	timeUuid := extractGUID.FindString(uuidString)
 	id, err := uuid.Parse(timeUuid)
@@ -133,7 +152,13 @@ func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
 	return nil
 }
 
-// GetBucketFile serves an object after the caller has authorized bucket access.
+// GetBucketFile serves the first matching UUID entry after the caller authorizes
+// bucket access. The object ID comes from the mux "id" variable. HEAD returns
+// object headers; ?parse=avro requests an Avro-to-JSON view.
+//
+// Readers share an archive lock, with acquisition controlled by r.Context().
+// Missing objects return 404 without creating files, invalid IDs return 400,
+// and archive or decoding failures return 500 when headers are not yet written.
 func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	id := mux.Vars(r)["id"]
 	parse := r.URL.Query().Get("parse")
@@ -242,7 +267,14 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	}
 }
 
-// UploadToBucket stores an object after the caller has authorized bucket access.
+// UploadToBucket appends a complete, in-memory object after the caller authorizes
+// bucket access. It returns the extracted UUID and archive path, or an ID,
+// compression, lock, or filesystem error. A non-nil request supplies the context
+// used while acquiring the archive's exclusive append lock.
+//
+// Duplicate IDs are appended without rejection; GetBucketFile still returns
+// the first matching entry, so this function does not overwrite existing objects.
+// Compression may allocate another full buffer in addition to fileBytes.
 func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byte) (string, string, error) {
 	containerFile, uuid_id, err := GetBucketContainerFile(b, id)
 	if err != nil {
@@ -364,6 +396,9 @@ func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byt
 	return uuid_id, containerFile, nil
 }
 
+// GenerateTimeUUID replaces a random UUIDv4's first two groups with the process's
+// local date and minute (YYYYMMDD-HHMM). These ordinary minute values never set
+// the hexadecimal high bit used by EXTEND_LIFE_SUPPORT.
 func GenerateTimeUUID() string {
 	id, _ := uuid.NewRandom()
 	timeStamp := time.Now()

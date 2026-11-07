@@ -16,6 +16,9 @@ import (
 	"github.com/caddyserver/certmagic"
 )
 
+// LoadCertBundleFromPEM parses one or more certificate PEM blocks for CA trust.
+// It rejects decoded blocks whose type is not CERTIFICATE, invalid certificate
+// DER, and bundles with no certificates. Non-PEM text is skipped by encoding/pem.
 func LoadCertBundleFromPEM(pemBytes []byte) ([]*x509.Certificate, error) {
 	certificates := []*x509.Certificate{}
 	var block *pem.Block
@@ -39,6 +42,8 @@ func LoadCertBundleFromPEM(pemBytes []byte) ([]*x509.Certificate, error) {
 	return certificates, nil
 }
 
+// LoadCertBundleFromFile reads a CA certificate bundle and parses it with
+// LoadCertBundleFromPEM. File read errors and bundle parsing errors are returned.
 func LoadCertBundleFromFile(filename string) ([]*x509.Certificate, error) {
 	b, err := os.ReadFile(filename)
 	if err != nil {
@@ -48,6 +53,13 @@ func LoadCertBundleFromFile(filename string) ([]*x509.Certificate, error) {
 	return LoadCertBundleFromPEM(b)
 }
 
+// ReadCertificates builds the trust pool used to contact the ACME server.
+// It adds certificate bundles from /data/ca/ and the required system bundle at
+// /etc/ssl/certs/ca-certificates.crt to the system certificate pool.
+//
+// An unreadable /data/ca/ directory is ignored. An invalid entry in that
+// directory or a system pool error causes a panic; failure to load the required
+// system bundle terminates the process through log.Fatal.
 func ReadCertificates() *x509.CertPool {
 	certpool, err := x509.SystemCertPool()
 	if err != nil {
@@ -89,6 +101,15 @@ func ReadCertificates() *x509.CertPool {
 	return certpool
 }
 
+// HTTPSACME obtains and manages certificates for domainNames, serves mux over
+// TLS, and serves ACME challenges and HTTPS redirects on the HTTP listener.
+// A nil mux selects http.DefaultServeMux. It blocks while serving HTTPS and
+// returns certificate management, listener setup, or HTTPS serving errors.
+//
+// Call it once during process startup: it configures CertMagic globals and
+// shared listeners. Certificate state is stored in /data/acme/; ACME server
+// trust comes from ReadCertificates. HTTPPort and HTTPSPort default to 80 and
+// 443 and are independent of the executable's SERVER_PORT setting.
 func HTTPSACME(domainNames []string, mux http.Handler, acme_server string) error {
 	ctx := context.Background()
 
@@ -206,24 +227,20 @@ func hostOnly(hostport string) string {
 }
 
 const (
-	// HTTPChallengePort is the officially-designated port for
-	// the HTTP challenge according to the ACME spec.
+	// HTTPChallengePort identifies the standard ACME HTTP-01 challenge port.
 	HTTPChallengePort = 80
 
-	// TLSALPNChallengePort is the officially-designated port for
-	// the TLS-ALPN challenge according to the ACME spec.
+	// TLSALPNChallengePort identifies the standard ACME TLS-ALPN-01 challenge port.
 	TLSALPNChallengePort = 443
 )
 
 var (
-	// HTTPPort is the port on which to serve HTTP
-	// and, as such, the HTTP challenge (unless
-	// Default.AltHTTPPort is set).
+	// HTTPPort controls HTTPSACME's HTTP challenge and redirect listener.
+	// The executable leaves it at 80; SERVER_PORT does not change it.
 	HTTPPort = 80
 
-	// HTTPSPort is the port on which to serve HTTPS
-	// and, as such, the TLS-ALPN challenge
-	// (unless Default.AltTLSALPNPort is set).
+	// HTTPSPort controls HTTPSACME's TLS listener.
+	// The executable leaves it at 443; SERVER_PORT does not change it.
 	HTTPSPort = 443
 )
 

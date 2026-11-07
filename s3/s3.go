@@ -10,14 +10,19 @@ import (
 	"time"
 )
 
+// Authorization is the HTTP header used for V2 and V4 header authentication.
 const Authorization = "Authorization"
 
+// S3User grants read and write access across the server's buckets.
+// SecretAccessKey is used to verify signatures and must remain private.
 type S3User struct {
 	SecretAccessKey string
 	Write           bool
 	Read            bool
 }
 
+// S3Users is the synchronized credential registry used by this package.
+// Manage the package registry through the AddS3User functions and ResetS3Users.
 type S3Users struct {
 	mu sync.RWMutex
 	m  map[string]S3User
@@ -32,16 +37,21 @@ func ResetS3Users() {
 	s3UsersList.m = make(map[string]S3User)
 }
 
+// AddS3User adds or replaces a static access key and its server-wide permissions.
 func AddS3User(accessKeyID string, secretAccessKey string, write bool, read bool) {
 	s3UsersList.mu.Lock()
 	defer s3UsersList.mu.Unlock()
 	s3UsersList.m[accessKeyID] = S3User{SecretAccessKey: secretAccessKey, Write: write, Read: read}
 }
 
+// AddS3UserWrite loads semicolon-separated access-key=secret pairs with read
+// and write permission. Empty or malformed pairs are ignored.
 func AddS3UserWrite(users string) {
 	addS3Users(users, true)
 }
 
+// AddS3UserReadOnly loads semicolon-separated access-key=secret pairs with read
+// permission only. A matching access key replaces an earlier registration.
 func AddS3UserReadOnly(users string) {
 	addS3Users(users, false)
 }
@@ -55,8 +65,12 @@ func addS3Users(users string, write bool) {
 	}
 }
 
+// S3SecurityHandle handles a request whose S3 identity has been authenticated.
+// Resource handlers still enforce the permissions required for their operation.
 type S3SecurityHandle func(w http.ResponseWriter, r *http.Request, user S3User)
 
+// S3Security authenticates V2 header signatures or V4 header/query signatures.
+// V4 bodies are verified before next is invoked; failures use S3 XML errors.
 func S3Security(next S3SecurityHandle) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if len(headerValues(r, "authorization")) > 1 {

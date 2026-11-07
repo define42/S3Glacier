@@ -1,5 +1,7 @@
 package shared
 
+// DO_NOT_COMPRESS lists precompressed file extensions but is not currently
+// consulted by UploadToBucket. Treat this map as read-only while serving requests.
 var DO_NOT_COMPRESS = map[string]bool{
 	".xz":   true,
 	".gz":   true,
@@ -34,6 +36,9 @@ var DO_NOT_COMPRESS = map[string]bool{
 	".deb":  true,
 }
 
+// DO_COMPRESS contains extension and MIME-type keys eligible for compression.
+// UploadToBucket also compresses every object of 101 through 19,999,999 bytes
+// regardless of this set. Treat the map as read-only while serving requests.
 var DO_COMPRESS = map[string]bool{
 	".txt":       true,
 	".html":      true,

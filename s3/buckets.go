@@ -22,10 +22,14 @@ import (
 )
 
 const (
+	// TarFilesPerHourHeader supplies the immutable shard count on S3 bucket creation.
+	// Its x-amz prefix makes the value part of the request signature.
 	TarFilesPerHourHeader = "X-Amz-Meta-Tar-Files-Per-Hour"
 	s3Namespace           = "http://s3.amazonaws.com/doc/2006-03-01/"
 )
 
+// GetBucketLocation encodes the empty region returned by the location subresource.
+// The archive server accepts S3 signing regions without assigning a bucket region.
 type GetBucketLocation struct {
 	XMLName            xml.Name `xml:"LocationConstraint"`
 	Xmlns              string   `xml:"xmlns,attr"`
@@ -71,7 +75,9 @@ func bucketHeaders(w http.ResponseWriter, b bucket.Bucket) {
 	w.Header().Set(TarFilesPerHourHeader, strconv.Itoa(b.TarFilesPerHour))
 }
 
-// BucketHandler creates buckets and exposes their immutable storage layout.
+// BucketHandler handles PUT creation, HEAD existence checks, and GET ?location.
+// Wrap it with S3Security and provide a bucket mux variable. Creation requires
+// TarFilesPerHourHeader; existing buckets return 409 and object listing returns 501.
 func BucketHandler(store *bucket.Store) S3SecurityHandle {
 	return func(w http.ResponseWriter, r *http.Request, user S3User) {
 		name := mux.Vars(r)["bucket"]
@@ -139,8 +145,9 @@ func BucketHandler(store *bucket.Store) S3SecurityHandle {
 	}
 }
 
-// ObjectHandler serves objects inside the bucket resolved from the request path.
-// S3Security authenticates the request before this handler is invoked.
+// ObjectHandler handles PUT, GET, and HEAD for bucket and id mux variables.
+// Wrap it with S3Security; configured HTTP API tokens are not required. Missing
+// buckets return 404, and unsupported methods or subresources are rejected.
 func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 	return func(w http.ResponseWriter, r *http.Request, user S3User) {
 		switch r.Method {
@@ -245,6 +252,7 @@ type objectResponseWriter struct {
 	hasError  bool
 }
 
+// WriteHeader converts an initial shared read error into an S3 XML response.
 func (w *objectResponseWriter) WriteHeader(status int) {
 	if w.hasStatus {
 		return
@@ -269,6 +277,7 @@ func (w *objectResponseWriter) WriteHeader(status int) {
 	writeS3Error(w.ResponseWriter, w.request, status, code, message)
 }
 
+// Write streams successful object bytes and suppresses HEAD and replaced error bodies.
 func (w *objectResponseWriter) Write(data []byte) (int, error) {
 	if !w.hasStatus {
 		w.WriteHeader(http.StatusOK)
@@ -290,7 +299,8 @@ type listAllMyBucketsResult struct {
 	Buckets []listedBucket `xml:"Buckets>Bucket"`
 }
 
-// ListBuckets returns the buckets available on this server to an authenticated reader.
+// ListBuckets handles signed GET / with an XML list of all configured buckets.
+// Wrap it with S3Security. It requires read permission and does not list objects.
 func ListBuckets(store *bucket.Store) S3SecurityHandle {
 	return func(w http.ResponseWriter, r *http.Request, user S3User) {
 		if r.Method != http.MethodGet {

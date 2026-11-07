@@ -1,4 +1,6 @@
-// Package bucket persists immutable archive bucket configurations.
+// Package bucket persists immutable bucket definitions beneath a data root.
+// Every bucket stores objects in its own buckets/<name> directory; definitions
+// live in .buckets and must be retained with the object data.
 package bucket
 
 import (
@@ -18,32 +20,46 @@ import (
 )
 
 const (
-	DefaultName            = "data"
+	// DefaultName identifies the bucket created automatically by Open.
+	DefaultName = "data"
+	// DefaultTarFilesPerHour is the default bucket's immutable hourly shard limit.
 	DefaultTarFilesPerHour = 256
-	MaxTarFilesPerHour     = 65536
+	// MaxTarFilesPerHour bounds the shard count accepted for a new bucket.
+	MaxTarFilesPerHour = 65536
 
 	configVersion = 1
 	bucketLayout  = "bucket"
 )
 
 var (
-	ErrNotFound        = errors.New("bucket: not found")
-	ErrInvalidName     = errors.New("bucket: invalid name")
+	// ErrNotFound indicates that no bucket has the requested valid name.
+	ErrNotFound = errors.New("bucket: not found")
+	// ErrInvalidName indicates an invalid or reserved bucket name.
+	ErrInvalidName = errors.New("bucket: invalid name")
+	// ErrInvalidTarFiles indicates a count outside 1 through MaxTarFilesPerHour.
 	ErrInvalidTarFiles = errors.New("bucket: invalid tar files per hour")
-	ErrExists          = errors.New("bucket: already exists")
+	// ErrExists prevents recreating or changing an existing bucket.
+	ErrExists = errors.New("bucket: already exists")
 
 	validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
 )
 
-// Bucket describes a bucket's immutable storage layout.
+// Bucket is a copy of a persisted bucket definition. Changing its fields does
+// not update the Store; callers should preserve its count and path for object access.
 type Bucket struct {
-	Name            string    `json:"name"`
-	TarFilesPerHour int       `json:"tar_files_per_hour"`
-	CreatedAt       time.Time `json:"created_at"`
-	Path            string    `json:"-"`
+	// Name is the validated, server-wide bucket identifier.
+	Name string `json:"name"`
+	// TarFilesPerHour limits the shard files in each hourly archive folder.
+	TarFilesPerHour int `json:"tar_files_per_hour"`
+	// CreatedAt records bucket creation independently of object timestamps.
+	CreatedAt time.Time `json:"created_at"`
+	// Path is the absolute data directory and is omitted from public JSON.
+	Path string `json:"-"`
 }
 
-// Store manages bucket configurations under a single absolute data root.
+// Store is safe for concurrent calls and serializes metadata writes across
+// processes. Get and List use a loaded snapshot; Create reloads definitions and
+// rejects changes to previously loaded buckets.
 type Store struct {
 	root    string
 	metaDir string
@@ -59,8 +75,10 @@ type diskConfig struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
-// Open loads persisted buckets and creates the default data bucket if absent.
-// Invalid persisted configurations prevent the store from opening.
+// Open resolves root to an absolute path and loads its .buckets definitions.
+// If absent, the data bucket is created at root/buckets/data with a fixed count
+// of 256. Empty roots, filesystem errors, and invalid or unsupported persisted
+// configurations return an error; existing definitions are never migrated.
 func Open(root string) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("bucket: data root is empty")
@@ -96,6 +114,10 @@ func Open(root string) (*Store, error) {
 
 // Create durably publishes a new bucket. Existing buckets can never be changed,
 // including by calling Create again with the same configuration.
+// Names require 3-63 lowercase letters, digits or hyphens, alphanumeric ends,
+// and must not be reserved route names. Counts must be within 1 through
+// MaxTarFilesPerHour. Validation returns ErrInvalidName or ErrInvalidTarFiles;
+// any existing name returns ErrExists. Filesystem failures also return errors.
 func (s *Store) Create(name string, count int) (Bucket, error) {
 	if err := validateName(name); err != nil {
 		return Bucket{}, err
@@ -154,7 +176,8 @@ func (s *Store) create(name string, count int) (Bucket, error) {
 	return b, nil
 }
 
-// Get returns a copy of the named bucket configuration.
+// Get returns a copy from the loaded definitions, or ErrNotFound for an unknown
+// bucket. Invalid or reserved names return ErrInvalidName.
 func (s *Store) Get(name string) (Bucket, error) {
 	if err := validateName(name); err != nil {
 		return Bucket{}, err
@@ -168,7 +191,7 @@ func (s *Store) Get(name string) (Bucket, error) {
 	return b, nil
 }
 
-// List returns independent copies of the buckets, sorted by name.
+// List returns independent copies of the loaded buckets, sorted by name.
 func (s *Store) List() []Bucket {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -53,8 +53,9 @@ func encodeURL2Path(req *http.Request, virtualHost bool) (path string) {
 	return
 }
 
-// PreSignV2 - presign the request in following style.
-// https://${S3_BUCKET}.s3.amazonaws.com/${S3_OBJECT}?AWSAccessKeyId=${S3_ACCESS_KEY}&Expires=${TIMESTAMP}&Signature=${SIGNATURE}.
+// PreSignV2 adds a client-side V2 query signature expiring after expires seconds.
+// It updates the request's shared URL and header maps. The archive server accepts
+// V2 header authentication, not the presigned URLs produced by this helper.
 func PreSignV2(req http.Request, accessKeyID, secretAccessKey string, expires int64, virtualHost bool) *http.Request {
 	// Presign is not needed for anonymous credentials.
 	if accessKeyID == "" || secretAccessKey == "" {
@@ -99,8 +100,8 @@ func PreSignV2(req http.Request, accessKeyID, secretAccessKey string, expires in
 	return &req
 }
 
-// PostPresignSignatureV2 - presigned signature for PostPolicy
-// request.
+// PostPresignSignatureV2 signs a base64-encoded V2 POST policy for client use.
+// The archive server does not implement S3 POST-policy uploads.
 func PostPresignSignatureV2(policyBase64, secretAccessKey string) string {
 	hm := hmac.New(sha1.New, []byte(secretAccessKey))
 	hm.Write([]byte(policyBase64))
@@ -124,7 +125,9 @@ func PostPresignSignatureV2(policyBase64, secretAccessKey string) string {
 //
 // CanonicalizedProtocolHeaders = <described below>
 
-// SignV2 sign the request before Do() (AWS Signature Version 2).
+// SignV2 adds a V2 Authorization header and supplies Date when it is absent.
+// virtualHost includes the bucket from the hostname in the canonical resource;
+// requests to this archive server use path-style URLs and virtualHost=false.
 func SignV2(req http.Request, accessKeyID, secretAccessKey string, virtualHost bool) *http.Request {
 	// Signature calculation is not needed for anonymous credentials.
 	if accessKeyID == "" || secretAccessKey == "" {
@@ -185,6 +188,9 @@ func writePreSignV2Headers(buf *bytes.Buffer, req http.Request) {
 	buf.WriteString(req.Header.Get("Expires") + "\n")
 }
 
+// StringToSignV2 builds canonical V2 signing input without changing the request.
+// virtualHost selects hostname-based rather than path-style bucket addressing.
+//
 // From the Amazon docs:
 //
 // StringToSign = HTTP-Verb + "\n" +
