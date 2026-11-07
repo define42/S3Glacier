@@ -2,6 +2,7 @@ package config
 
 import (
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"os"
 )
 
@@ -27,42 +28,49 @@ func (s *SettingsType) Has(id string) bool {
 func (s *SettingsType) Set(id string, description string, defaultValue string) {
 	if value, ok := os.LookupEnv(id); ok {
 		s.m[id] = SettingType{Description: description, Value: value}
-	}else{
+	} else {
 		s.m[id] = SettingType{Description: description, Value: defaultValue}
 	}
 }
 
-
 const (
-	ACME_SERVER   = "ACME_SERVER"
-	SERVER_DOMAIN = "SERVER_DOMAIN"
-	DISK_USAGE_ALLOWED = "DISK_USAGE_ALLOWED"
+	ACME_SERVER         = "ACME_SERVER"
+	SERVER_DOMAIN       = "SERVER_DOMAIN"
+	DISK_USAGE_ALLOWED  = "DISK_USAGE_ALLOWED"
 	EXTEND_LIFE_SUPPORT = "EXTEND_LIFE_SUPPORT"
-	DATA_FOLDER = "DATA_FOLDER"
-	SERVER_PORT = "SERVER_PORT"
-	READ_TOKEN = "READ_TOKEN"
-	WRITE_TOKEN = "WRITE_TOKEN"
-	S3_READ_ONLY_USERS = "S3_READ_ONLY_USERS"
+	DATA_FOLDER         = "DATA_FOLDER"
+	SERVER_PORT         = "SERVER_PORT"
+	READ_TOKEN          = "READ_TOKEN"
+	WRITE_TOKEN         = "WRITE_TOKEN"
+	S3_READ_ONLY_USERS  = "S3_READ_ONLY_USERS"
 	S3_READ_WRITE_USERS = "S3_READ_WRITE_USERS"
 )
 
 func (s *SettingsType) Init() {
 	s.Set(ACME_SERVER, "ACME server url", "")
-	s.Set(SERVER_DOMAIN, "server domain name","")
-	s.Set(DISK_USAGE_ALLOWED, "Allowed disk usage in percentage","75")
-	s.Set(EXTEND_LIFE_SUPPORT, "Enable extended life support","false")
-	s.Set(DATA_FOLDER, "data folder","/files")
-	s.Set(SERVER_PORT, "server tcp port","8000")
-	s.Set(READ_TOKEN, "Read TOKEN [;]","")
-	s.Set(WRITE_TOKEN, "Write TOKEN [;]","")
-	s.Set(S3_READ_ONLY_USERS, "S3 Read only users [user=key;]","")
-	s.Set(S3_READ_WRITE_USERS, "S3 Read and Write users [user=key;]","")
+	s.Set(SERVER_DOMAIN, "server domain name", "")
+	s.Set(DISK_USAGE_ALLOWED, "Allowed disk usage in percentage", "75")
+	s.Set(EXTEND_LIFE_SUPPORT, "Enable extended life support", "false")
+	s.Set(DATA_FOLDER, "data folder", "/files")
+	s.Set(SERVER_PORT, "server tcp port", "8000")
+	s.Set(READ_TOKEN, "Read TOKEN [;]", "")
+	s.Set(WRITE_TOKEN, "Write TOKEN [;]", "")
+	s.Set(S3_READ_ONLY_USERS, "S3 Read only users [user=key;]", "")
+	s.Set(S3_READ_WRITE_USERS, "S3 Read and Write users [user=key;]", "")
 
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetAutoWrapText(false)
-	table.SetRowLine(true)
-	table.SetAutoFormatHeaders(true)
-	table.SetHeader([]string{"KEY", "Description", "value"})
+	table := tablewriter.NewTable(
+		os.Stdout,
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithHeaderAutoFormat(tw.On),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+			Settings: tw.Settings{
+				Separators: tw.Separators{BetweenRows: tw.On},
+			},
+		}),
+	)
+	table.Header("KEY", "Description", "value")
 	for key, setting := range s.m {
 		table.Append([]string{key, setting.Description, setting.Value})
 	}

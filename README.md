@@ -37,6 +37,22 @@ Ongoing work
 - Swift storage
 - Multiple variants of same file
 
+## Build and container images
+
+GitHub Actions runs tests with race detection, vets the code, and builds the binary
+and Docker image for pull requests to `main` and pushes to `main`. The Go version
+is read from `go.mod`.
+
+After successful checks on `main`, the workflow publishes
+`ghcr.io/define42/s3glacier` with `latest`, `YYYY.MM.DD` (UTC), and `sha-<commit>`
+tags. Pull requests build the image without publishing it. Publishing uses the
+repository's automatic `GITHUB_TOKEN` with `packages: write`; no Docker Hub
+credentials are required.
+
+```sh
+docker pull ghcr.io/define42/s3glacier:latest
+```
+
 ## Example RawUpload
 ```
 POST /rawupload/[[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}]
@@ -72,4 +88,3 @@ test
 
 -----------------------------273754160213256655563977755994--
 ```
-

@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"glacier/shared"
 	"io"
-	"io/ioutil"
-	"log"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -19,12 +18,10 @@ func TestS3(t *testing.T) {
 	accessKeyID := "s3usernameABC"
 	secretAccessKey := "s3passwordABC"
 	t.Setenv("S3_READ_WRITE_USERS", accessKeyID+"="+secretAccessKey)
-	endpoint := "localhost"
+	testServer := newTestServer(t)
+	endpoint := strings.TrimPrefix(testServer.URL, "http://")
 	test_uuid := shared.GenerateTimeUUID()
 	useSSL := false
-
-	r := InitServer()
-	go http.ListenAndServe(":80", r)
 
 	// Initialize minio client object.
 	server, err := minio.New(endpoint, &minio.Options{
@@ -38,16 +35,17 @@ func TestS3(t *testing.T) {
 
 	data := []byte("this is some data stored as a byte slice in Go Lang!")
 	reader := bytes.NewReader(data)
-	_, err = server.PutObject(context.Background(), "data", test_uuid, reader, (int64)(len(data)), minio.PutObjectOptions{})
+	_, err = server.PutObject(t.Context(), "data", test_uuid, reader, (int64)(len(data)), minio.PutObjectOptions{})
 	if err != nil {
 		t.Fatalf("S3 upload panic: %v", err)
 	}
 
-	file2, err := server.GetObject(context.Background(), "data", test_uuid, minio.GetObjectOptions{})
+	file2, err := server.GetObject(t.Context(), "data", test_uuid, minio.GetObjectOptions{})
 	if err != nil {
 		t.Fatalf("Unable to GetObject Error:%v", err)
 	}
-	outputData, err2 := ioutil.ReadAll(file2)
+	defer file2.Close()
+	outputData, err2 := io.ReadAll(file2)
 	if err2 != nil {
 		t.Fatalf("Unable to read file! Error:%v", err2)
 	}
@@ -58,44 +56,65 @@ func TestS3(t *testing.T) {
 }
 
 func TestServer(t *testing.T) {
+	t.Setenv("S3_READ_WRITE_USERS", "")
+	testServer := newTestServer(t)
 	test_uuid := shared.GenerateTimeUUID()
 	data := []byte("this is some data stored as a byte slice in Go Lang!")
-	r := InitServer()
-	go http.ListenAndServe(":8000", r)
 
 	bodyBuf := &bytes.Buffer{}
 	bodyWriter := multipart.NewWriter(bodyBuf)
 
 	fileWriter, err := bodyWriter.CreateFormFile("file", test_uuid)
 	if err != nil {
-		t.Fatalf("Panic error writing to buffer")
+		t.Fatalf("Error creating upload form: %v", err)
 	}
 
 	reader := bytes.NewReader(data)
-	io.Copy(fileWriter, reader)
+	if _, err := io.Copy(fileWriter, reader); err != nil {
+		t.Fatalf("Error writing upload data: %v", err)
+	}
 	contentType := bodyWriter.FormDataContentType()
-	bodyWriter.Close()
-	resp, err := http.Post("http://localhost:8000/upload", contentType, bodyBuf)
+	if err := bodyWriter.Close(); err != nil {
+		t.Fatalf("Error closing upload form: %v", err)
+	}
+	resp, err := testServer.Client().Post(testServer.URL+"/upload", contentType, bodyBuf)
 	if err != nil {
-		t.Fatalf("Panic unable to upload file")
+		t.Fatalf("Unable to upload file: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Wrong response-code! Have:\"%v\"", resp.Status)
 	}
 
-	getresp, err := http.Get("http://localhost:8000/get/" + test_uuid)
+	getresp, err := testServer.Client().Get(testServer.URL + "/get/" + test_uuid)
 	if err != nil {
 		t.Fatalf("Unable to get file! Error:%v", err)
 	}
+	defer getresp.Body.Close()
+	if getresp.StatusCode != http.StatusOK {
+		t.Fatalf("Wrong download response-code! Have:%q", getresp.Status)
+	}
 
-	getbody, err := ioutil.ReadAll(getresp.Body)
+	getbody, err := io.ReadAll(getresp.Body)
 	if err != nil {
-		log.Fatalln(err)
+		t.Fatalf("Unable to read file: %v", err)
 	}
 
 	if bytes.Compare(getbody, data) != 0 {
 		t.Fatalf("Upload/download did not pass! Want:\"%v\" Have:\"%v\"", string(data), string(getbody))
 	}
+}
+
+func newTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	t.Setenv("DATA_FOLDER", "files")
+	t.Setenv("READ_TOKEN", "")
+	t.Setenv("WRITE_TOKEN", "")
+	t.Setenv("S3_READ_ONLY_USERS", "")
+	t.Setenv("EXTEND_LIFE_SUPPORT", "false")
+	server := httptest.NewServer(InitServer())
+	t.Cleanup(server.Close)
+	return server
 }
