@@ -147,6 +147,25 @@ V4 checks signatures, request times, signed payload hashes, and supported
 checksums. Signed streaming uploads and signed/unsigned checksum trailers are
 supported. Presigned URL expiry must be 1–604,800 seconds.
 
+#### Supported S3 commands
+
+The server implements this subset of the S3 API:
+
+| S3 operation | HTTP request | Supported behavior |
+| --- | --- | --- |
+| `ListBuckets` | `GET /` | Lists all configured bucket names and creation dates. Does not list objects. |
+| `CreateBucket` | `PUT /{bucket}` | Creates a bucket with the required signed `x-amz-meta-tar-files-per-hour` header. The count is immutable; an existing name returns `409`. |
+| `HeadBucket` | `HEAD /{bucket}` | Checks whether the bucket exists and returns its TAR count header. |
+| `GetBucketLocation` | `GET /{bucket}?location` | Returns an empty XML `LocationConstraint`; buckets have no assigned region. |
+| `PutObject` | `PUT /{bucket}/{key}` | Appends an object and returns its MD5 `ETag`. Repeated UUIDs append additional entries rather than overwriting earlier ones. |
+| `GetObject` | `GET /{bucket}/{key}` | Returns the original, decompressed bytes from the first committed matching UUID. |
+| `HeadObject` | `HEAD /{bucket}/{key}` | Returns headers for the first committed matching UUID, without an object body. |
+
+All operations require S3 authentication. `CreateBucket` and `PutObject` require
+write permission; the other operations require read permission. Object keys must
+contain a [supported time UUID](#object-identifiers). `GetObject` serves the full
+object; byte-range and conditional requests are not implemented.
+
 S3 bucket creation uses `PUT /{bucket}` with the required signed extension header
 `x-amz-meta-tar-files-per-hour`. For the local example credentials:
 
@@ -159,9 +178,18 @@ curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
 ```
 
 Clients that cannot add this header can create buckets through the HTTP API.
-`ListBuckets` is supported; `ListObjects` and `ListObjectsV2` are not. S3 multipart
-upload, per-object deletion, presigned POST policies, and temporary STS credentials
-are also unsupported. HTTP multipart form upload is a separate supported route.
+
+#### Unsupported S3 commands and features
+
+- `ListObjects` and `ListObjectsV2` (listing objects within a bucket).
+- `DeleteBucket`, `DeleteObject`, and `DeleteObjects`.
+- `CopyObject` and S3 multipart upload operations, including multipart copy.
+- Object versioning and bucket/object subresources such as ACLs, policies,
+  tagging, and lifecycle configuration.
+- V2 presigned URLs, presigned POST policies, and temporary STS credentials.
+
+HTTP multipart form upload is a separate supported route. S3 signed streaming
+uploads are also supported, but do not provide the S3 multipart upload API.
 
 See the [API reference](docs/api.md) for routes, curl examples, status codes,
 client configuration, and signing details. The
