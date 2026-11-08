@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"container/list"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -29,16 +30,19 @@ type ListOptions struct {
 }
 
 // ListEntry describes the first committed occurrence of an object name. Size is
-// its original, uncompressed size. CommonPrefix entries have no object size.
+// its original, uncompressed size. ETag is an optional unquoted MD5 digest.
+// CommonPrefix entries have neither an object size nor an ETag.
 type ListEntry struct {
 	Key          string
 	Size         int64
+	ETag         string
 	CommonPrefix bool
 }
 
 type objectMetadata struct {
 	key  string
 	size int64
+	etag string
 }
 
 type metadataIndex struct {
@@ -299,13 +303,14 @@ func (s *Store) buildMetadata(ctx context.Context, r *Reader, old *metadataIndex
 		if _, exists := slices.BinarySearchFunc(base, object.key, compareMetadataKey); exists {
 			return nil
 		}
-		cost := int64(128 + len(object.key))
+		cost := int64(128 + len(object.key) + len(object.etag))
 		if next.bytes+cost > budget {
 			next.oversized = true
 			added = nil
 			return nil
 		}
 		object.key = strings.Clone(object.key)
+		object.etag = strings.Clone(object.etag)
 		added[object.key] = object
 		next.bytes += cost
 		return nil
@@ -352,7 +357,14 @@ func scanMetadata(ctx context.Context, f *os.File, start, end int64, visit func(
 		if size < 0 {
 			return fmt.Errorf("%w: negative original object size", ErrCorrupt)
 		}
-		if err := visit(objectMetadata{key: h.Name, size: size}); err != nil {
+		etag, present := h.PAXRecords[ETagKey]
+		if present {
+			digest, err := hex.DecodeString(etag)
+			if err != nil || len(digest) != 16 || etag != strings.ToLower(etag) {
+				return fmt.Errorf("%w: invalid stored ETag", ErrCorrupt)
+			}
+		}
+		if err := visit(objectMetadata{key: h.Name, size: size, etag: etag}); err != nil {
 			return err
 		}
 	}
@@ -392,11 +404,12 @@ func logicalEntry(object objectMetadata, opts ListOptions) (ListEntry, bool) {
 	if !strings.HasPrefix(object.key, opts.Prefix) {
 		return ListEntry{}, false
 	}
-	entry := ListEntry{Key: object.key, Size: object.size}
+	entry := ListEntry{Key: object.key, Size: object.size, ETag: object.etag}
 	if opts.Delimiter != "" {
 		if at := strings.Index(object.key[len(opts.Prefix):], opts.Delimiter); at >= 0 {
 			entry.Key = object.key[:len(opts.Prefix)+at+len(opts.Delimiter)]
 			entry.Size = 0
+			entry.ETag = ""
 			entry.CommonPrefix = true
 		}
 	}
@@ -420,6 +433,7 @@ func selectMetadata(ctx context.Context, objects []objectMetadata, opts ListOpti
 			continue
 		}
 		entry.Key = strings.Clone(entry.Key)
+		entry.ETag = strings.Clone(entry.ETag)
 		entries = append(entries, entry)
 		if len(entries) == opts.Limit {
 			break
@@ -450,6 +464,7 @@ func (c *listCollector) add(object objectMetadata) {
 		return
 	}
 	entry.Key = strings.Clone(entry.Key)
+	entry.ETag = strings.Clone(entry.ETag)
 	if len(c.entries) == c.opts.Limit {
 		delete(c.seen, c.entries[0].Key)
 		c.entries[0] = entry

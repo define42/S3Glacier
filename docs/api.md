@@ -177,14 +177,73 @@ curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
 
 Bucket listing and `ListObjectsV2` are supported. The older `ListObjects` API (`GET /{bucket}` without `list-type=2`) returns `501`. S3 multipart operations (`uploads`, `uploadId`, `partNumber`), object versioning, ACLs, and other subresources are unsupported. Unsupported methods, including `DELETE`, return `405`; unsupported query subresources return `501`. The signed SDK `x-id` annotation is accepted but does not choose the operation.
 
+### Object metadata
+
+S3 PUT stores every valid `x-amz-meta-*` attribute directly in the object's TAR
+PAX map. Metadata names are case-insensitive and stored lowercase. Repeated custom
+metadata fields are combined into a comma-separated value. The UUID remains the
+object identity; `x-amz-meta-filename` supplies a display filename, and the standard
+`Content-Disposition` header supplies download filename behavior.
+
+The following object headers are also preserved: `Content-Type`,
+`Content-Disposition`, `Content-Encoding`, `Content-Language`, `Cache-Control`,
+and `Expires`. A supplied content type takes precedence over detection. Custom
+metadata and these object headers each have a separate 2 KiB budget. Invalid
+metadata returns `400 InvalidArgument`; exceeding either budget returns
+`400 MetadataTooLarge`. Validation occurs before changing an archive.
+
+The user-metadata budget counts suffix names (without `x-amz-meta-`) and decoded
+UTF-8 values, including joining commas. The object-header budget counts names and
+values. Invalid UTF-8 and control characters are rejected. User values accept
+RFC 2047 encoded words; responses encode non-ASCII values and literal encoded-word
+text so SDK clients can decode them once without changing their contents.
+Repeated `Content-Type`, `Content-Disposition`, and `Expires` fields are rejected;
+repeated `Cache-Control`, `Content-Encoding`, and `Content-Language` values are
+combined with commas.
+
+| Input or generated value | PAX record |
+| --- | --- |
+| `x-amz-meta-filename: report.csv` | `S3Glacier.meta.filename=report.csv` |
+| `x-amz-meta-source: sensor-7` | `S3Glacier.meta.source=sensor-7` |
+| `Content-Type: text/csv` | `S3Glacier.http.content-type=text/csv` |
+| `Content-Disposition: attachment; filename="report.csv"` | `S3Glacier.http.content-disposition=attachment; filename="report.csv"` |
+| Server-computed MD5 | `S3Glacier.etag=<unquoted lowercase digest>` |
+
+There is no JSON metadata record or per-object sidecar. The existing
+`S3Glacier.sha256` record remains separate and describes the original uploaded
+bytes. Metadata, payload, and TAR footer are committed through the same durable
+checkpoint. No archive scan or extra commit step is added to uploads.
+
+S3 GET/HEAD and the HTTP download routes return saved metadata from the same first
+committed entry as the payload. Later uploads of the same UUID cannot replace
+those visible values. Metadata cannot be updated separately. Saved ETags are
+returned quoted on GET/HEAD and in `ListObjectsV2`; entries without an ETag omit
+it. Custom metadata is not included in listings or their cache.
+
+V4 presigned PUTs also accept user metadata in the signed query string. Header
+and query values for the same metadata name must agree, and the combined metadata
+must fit the size budget. Conflicts can return `400 InvalidRequest` during signature
+validation or `400 InvalidArgument` during metadata validation. V2 query metadata
+is unsupported. HTTP form and raw
+uploads retain their existing behavior and do not interpret form/request headers
+as S3 object metadata.
+
+`aws-chunked` is removed by V4 payload decoding before metadata is saved. Actual
+object encodings such as `gzip` remain separate from the server's internal TAR
+compression. Internal compression never adds a `Content-Encoding` response header.
+The generated `?parse=avro` view does not reuse the original representation's
+headers or ETag. Authentication, transport framing, ACLs, encryption settings,
+and tags are not persisted as object metadata by this feature.
+
 ### Listing objects
 
 `GET /{bucket}?list-type=2` returns unique canonical UUID keys in ascending lexical
 order. The key is the UUID extracted at upload, not the original filename. Later
 duplicate entries are omitted, and `Size` is the original uncompressed length of
 the first committed entry, matching GET/HEAD. `LastModified` uses the UUID's date
-at UTC midnight, as HEAD does. `StorageClass` is `STANDARD`. ETag and checksum
-metadata are omitted: listing does not read object payloads to compute them.
+at UTC midnight, as HEAD does. `StorageClass` is `STANDARD`. A stored ETag is
+included when available; entries without one omit it. Custom metadata and checksum
+values are omitted: listing does not read object payloads to compute them.
 
 | Query parameter | Behavior |
 | --- | --- |

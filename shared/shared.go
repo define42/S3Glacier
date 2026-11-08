@@ -105,12 +105,12 @@ func GetFileTime(uuidString string) time.Time {
 	return timestamp
 }
 
-func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
+func outputAvro2Json(reader io.Reader, w http.ResponseWriter) (bool, error) {
 
 	// Create a new OCF Reader
 	avroReader, err := goavro.NewOCFReader(reader)
 	if err != nil {
-		return err
+		return false, err
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -120,29 +120,29 @@ func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
 		// Get the next Avro data record
 		nativeData, err := avroReader.Read()
 		if err != nil {
-			return err
+			return true, err
 		}
 
 		// Convert native data to JSON
 		jsonData, err := json.Marshal(nativeData)
 		if err != nil {
-			return err
+			return true, err
 		}
 		_, err = w.Write(jsonData)
 		if err != nil {
-			return err
+			return true, err
 		}
 		if avroReader.RemainingBlockItems() > 0 {
 			_, err = w.Write([]byte(","))
 			if err != nil {
-				return err
+				return true, err
 			}
 		}
 
 	}
 	w.Write([]byte("]"))
 
-	return nil
+	return true, nil
 }
 
 // GetBucketFile serves the first matching UUID entry after the caller authorizes
@@ -155,24 +155,23 @@ func outputAvro2Json(reader io.Reader, w http.ResponseWriter) error {
 // failures return 500 when headers are not yet written.
 func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	id := mux.Vars(r)["id"]
-	parse := r.URL.Query().Get("parse")
 	containerFile, id, err := GetBucketContainerFile(b, id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		objectReadError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	tarFile, err := archive.Default.Open(r.Context(), containerFile)
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			http.NotFound(w, r)
+			objectReadError(w, "File not found", http.StatusNotFound)
 		case errors.Is(err, archive.ErrBusy):
 			w.Header().Set("Retry-After", "1")
-			http.Error(w, "Archive is busy; try again", http.StatusServiceUnavailable)
+			objectReadError(w, "Archive is busy; try again", http.StatusServiceUnavailable)
 		case errors.Is(err, archive.ErrUnavailable):
-			http.Error(w, "Archive is unavailable", http.StatusServiceUnavailable)
+			objectReadError(w, "Archive is unavailable", http.StatusServiceUnavailable)
 		default:
-			http.Error(w, "Unable to open archive", http.StatusInternalServerError)
+			objectReadError(w, "Unable to open archive", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -182,74 +181,72 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintln(w, "File not found")
+			objectReadError(w, "File not found", http.StatusNotFound)
 			return
 		}
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintln(w, "open tar file failed", err)
+			objectReadError(w, "Unable to read archive", http.StatusInternalServerError)
 			return
 		}
-		if archive.IsInternalEntry(hdr) {
-			continue
+		if !archive.IsInternalEntry(hdr) && id == hdr.Name {
+			serveBucketEntry(w, r, hdr, tr)
+			return
 		}
-		if id == hdr.Name {
-			if len(hdr.Gname) > 0 {
-				w.Header().Set("Content-Type", hdr.Gname)
-			}
-			if parse == "" {
-				size := hdr.Size
-				if hdr.Mode == 1 {
-					size = int64(hdr.Uid)
-				}
-				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			}
-			if r.Method == http.MethodHead {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			if hdr.Mode == int64(1) {
-				gzf, err := gzip.NewReader(tr)
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprintln(w, "gzip decompress error:", err)
-					return
-				}
-				defer gzf.Close()
+	}
+}
 
-				if parse == "avro" {
-					err = outputAvro2Json(gzf, w)
-					if err != nil {
-						w.WriteHeader(http.StatusInternalServerError)
-						fmt.Fprintln(w, "avro to json error:", err)
-					}
-					return
-				}
+func objectReadError(w http.ResponseWriter, message string, status int) {
+	ClearObjectMetadataHeaders(w.Header())
+	http.Error(w, message, status)
+}
 
-				_, err = io.Copy(w, gzf)
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprintln(w, "open compressed tar file failed", err)
-					fmt.Println("open compressed file failed", err)
-					return
-				}
+func serveBucketEntry(w http.ResponseWriter, r *http.Request, header *tar.Header, stored io.Reader) {
+	metadata, err := ObjectMetadataFromTar(header)
+	if err != nil || !validMetadataValue(header.Gname) {
+		objectReadError(w, "Invalid stored object metadata", http.StatusInternalServerError)
+		return
+	}
+	transformed := r.URL.Query().Get("parse") == "avro"
+	if transformed {
+		ClearObjectMetadataHeaders(w.Header())
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		applyObjectMetadata(w.Header(), metadata, header.Gname)
+		size := header.Size
+		if header.Mode == 1 {
+			size = int64(header.Uid)
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if header.Mode == 1 {
+		reader, err := gzip.NewReader(stored)
+		if err != nil {
+			objectReadError(w, "Unable to decompress object", http.StatusInternalServerError)
+			return
+		}
+		defer reader.Close()
+		stored = reader
+	}
+	if transformed {
+		started, err := outputAvro2Json(stored, w)
+		if err != nil {
+			if !started {
+				objectReadError(w, "Unable to decode Avro object", http.StatusInternalServerError)
 			} else {
-				if parse == "avro" {
-					err = outputAvro2Json(tr, w)
-					if err != nil {
-						w.WriteHeader(http.StatusInternalServerError)
-						fmt.Fprintln(w, "avro to json error:", err)
-					}
-					return
-				}
-				if _, err := io.Copy(w, tr); err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprintln(w, "open tar file failed", err)
-					return
-				}
+				fmt.Println("stream Avro object:", err)
 			}
-			return
+		}
+		return
+	}
+	if written, err := io.Copy(w, stored); err != nil {
+		if written == 0 {
+			objectReadError(w, "Unable to read object", http.StatusInternalServerError)
+		} else {
+			fmt.Println("stream object:", err)
 		}
 	}
 }
@@ -262,6 +259,17 @@ func GetBucketFile(w http.ResponseWriter, r *http.Request, b bucket.Bucket) {
 // to the HTTP/S3 caller.
 // Compression may allocate another full buffer in addition to fileBytes.
 func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byte) (string, string, error) {
+	return UploadToBucketWithMetadata(r, b, id, fileBytes, ObjectMetadata{})
+}
+
+// UploadToBucketWithMetadata commits explicit object metadata in the same TAR
+// entry as its payload. It does not infer object properties from HTTP transport
+// headers. Invalid metadata is rejected before compression or archive writes.
+func UploadToBucketWithMetadata(r *http.Request, b bucket.Bucket, id string, fileBytes []byte, metadata ObjectMetadata) (string, string, error) {
+	metadata, err := normalizeObjectMetadata(metadata)
+	if err != nil {
+		return "", "", err
+	}
 	containerFile, uuid_id, err := GetBucketContainerFile(b, id)
 	if err != nil {
 		fmt.Println(err)
@@ -296,7 +304,10 @@ func UploadToBucket(r *http.Request, b bucket.Bucket, id string, fileBytes []byt
 	storedPayload := fileBytes
 	header := &tar.Header{
 		Name: uuid_id, Size: int64(len(fileBytes)), Format: tar.FormatPAX,
-		Uname: id, PAXRecords: make(map[string]string), Gname: mtype.String(),
+		Uname: id, PAXRecords: metadata.paxRecords(), Gname: mtype.String(),
+	}
+	if contentType := metadata.Headers["content-type"]; contentType != "" {
+		header.Gname = contentType
 	}
 	if doCompress {
 		storedPayload = output.Bytes()

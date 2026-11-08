@@ -158,7 +158,7 @@ The server implements this subset of the S3 API:
 | `HeadBucket` | `HEAD /{bucket}` | Checks whether the bucket exists and returns its TAR count header. |
 | `GetBucketLocation` | `GET /{bucket}?location` | Returns an empty XML `LocationConstraint`; buckets have no assigned region. |
 | `ListObjectsV2` | `GET /{bucket}?list-type=2` | Lists unique canonical UUID keys in lexical order, with prefix filtering, delimiters, and continuation tokens. |
-| `PutObject` | `PUT /{bucket}/{key}` | Appends an object and returns its MD5 `ETag`. Repeated UUIDs append additional entries rather than overwriting earlier ones. |
+| `PutObject` | `PUT /{bucket}/{key}` | Appends an object with user metadata and supported object headers, and returns its MD5 `ETag`. Repeated UUIDs append additional entries rather than overwriting earlier ones. |
 | `GetObject` | `GET /{bucket}/{key}` | Returns the original, decompressed bytes from the first committed matching UUID. |
 | `HeadObject` | `HEAD /{bucket}/{key}` | Returns headers for the first committed matching UUID, without an object body. |
 
@@ -180,6 +180,40 @@ curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
 
 Clients that cannot add this header can create buckets through the HTTP API.
 
+#### Object metadata and filenames
+
+S3 uploads preserve all valid `x-amz-meta-*` attributes as individual PAX records
+on their TAR entry. Names are normalized to lowercase. The server also preserves
+`Content-Type`, `Content-Disposition`, `Content-Encoding`, `Content-Language`,
+`Cache-Control`, and `Expires`, and returns saved metadata on GET and HEAD.
+Custom metadata has a 2 KiB budget; the supported object headers have a separate
+2 KiB budget. Invalid or oversized metadata is rejected before the archive changes.
+
+For example, upload a CSV with an alternative filename:
+
+```sh
+printf 'sensor,value\n7,42\n' > /tmp/glacier-report.csv
+curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user 'local-access:local-secret' \
+  -X PUT 'http://localhost:8000/data/20261108-1200-4000-8000-000000000001' \
+  -H 'x-amz-meta-filename: report.csv' \
+  -H 'x-amz-meta-source: sensor-7' \
+  -H 'Content-Type: text/csv' \
+  -H 'Content-Disposition: attachment; filename="report.csv"' \
+  --data-binary @/tmp/glacier-report.csv
+```
+
+The browser uses `filename` metadata when present; `Content-Disposition` controls
+the download filename. The UUID remains the object key. Repeated UUIDs retain the
+first committed entry's bytes and metadata. The computed MD5 ETag is also stored
+and returned on GET, HEAD, and object listings. Entries without a stored ETag omit
+it; readers do not hash payloads to reconstruct it.
+
+Metadata is stored directly under `S3Glacier.meta.*` and `S3Glacier.http.*` PAX
+keys, with the ETag in `S3Glacier.etag`. There is no JSON wrapper or separate
+metadata file. Authentication and transport headers are not object metadata;
+tags remain unsupported. See the [metadata reference](docs/api.md#object-metadata).
+
 #### Listing objects
 
 List objects for an hour using their UUID prefix:
@@ -200,7 +234,8 @@ Pages contain at most 1,000 results. When `IsTruncated` is true, pass the return
 `NextContinuationToken` as `continuation-token` with the same bucket, prefix,
 delimiter, and credentials. `start-after`, `delimiter`, `encoding-type=url`, and
 `fetch-owner` are also supported; see the [listing reference](docs/api.md#listing-objects).
-Listing omits ETags because stored entries do not retain their MD5 values.
+Listings include stored ETags when available. Custom metadata is retrieved through
+GET or HEAD and is not retained in the listing cache.
 
 Listings scan committed metadata without holding an archive lock throughout the
 scan. A process-local metadata cache with a 32 MiB budget shared across buckets

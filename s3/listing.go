@@ -28,6 +28,7 @@ func archiveOwner() listOwner { return listOwner{ID: "s3glacier", DisplayName: "
 type listedObject struct {
 	Key          string     `xml:"Key"`
 	LastModified string     `xml:"LastModified"`
+	ETag         string     `xml:"ETag,omitempty"`
 	Size         int64      `xml:"Size"`
 	StorageClass string     `xml:"StorageClass"`
 	Owner        *listOwner `xml:"Owner,omitempty"`
@@ -196,6 +197,9 @@ func listObjectsV2(w http.ResponseWriter, r *http.Request, b bucket.Bucket, user
 		}
 		object := listedObject{Key: entry.Key, Size: entry.Size, StorageClass: "STANDARD",
 			LastModified: shared.GetFileTime(entry.Key).UTC().Format("2006-01-02T15:04:05.000Z")}
+		if entry.ETag != "" {
+			object.ETag = `"` + entry.ETag + `"`
+		}
 		if q.fetchOwner {
 			object.Owner = &owner
 		}

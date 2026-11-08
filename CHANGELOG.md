@@ -7,6 +7,8 @@ current development branch and do not imply a published version.
 
 ### Added
 
+- S3 user metadata and supported object headers stored directly in TAR PAX records
+  and returned on GET/HEAD, with stored ETags also available in object listings.
 - S3 `ListObjectsV2` with canonical UUID prefix filtering, delimiters, pagination,
   and a bounded metadata cache that refreshes from committed archive suffixes.
 - Per-archive committed-boundary checkpoints and identity manifests, with lazy

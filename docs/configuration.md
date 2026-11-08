@@ -143,7 +143,8 @@ already collected metadata.
 
 S3 `ListObjectsV2` captures a committed archive boundary under the lock, then
 releases the lock before scanning metadata. Its bounded in-memory cache stores
-keys and sizes rather than file handles. Cache misses and refreshes share CPU and
+keys, sizes, and available ETags rather than file handles or custom object
+metadata. Cache misses and refreshes share CPU and
 disk bandwidth with uploads, but do not hold a shard lock for the full scan.
 Listing does not create an on-disk index or change the append durability protocol.
 The metadata-cache budget is 32 MiB across buckets, with a separate bounded build

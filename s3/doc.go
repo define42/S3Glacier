@@ -10,8 +10,15 @@
 // replacement, multipart S3 uploads, and POST-policy uploads are not
 // implemented. Raw HTTP multipart uploads are a separate application API.
 //
+// PUT persists x-amz-meta-* user metadata and the supported Content-Type,
+// Content-Disposition, Content-Encoding, Content-Language, Cache-Control and
+// Expires fields. GET and HEAD return the first committed entry's metadata.
+// User metadata has a 2 KiB budget; representation fields have a separate
+// 2 KiB budget. Verified V4 query metadata is accepted, with conflicting header
+// values rejected. Authentication, cookies and framing headers are not stored.
+//
 // Listings expose original object sizes and the UUID-date LastModified used by
-// HEAD. ETags are omitted because the original MD5 is not stored. Owner fields
+// HEAD, together with persisted ETags when available. Owner fields
 // use the server identity "s3glacier", not per-user ownership. Continuation
 // tokens bind the bucket incarnation and filter to the authenticated secret;
 // they survive a restart with unchanged credentials, data root and settings.

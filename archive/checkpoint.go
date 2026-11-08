@@ -23,6 +23,8 @@ const (
 	ManifestName = ".s3glacier-manifest.json"
 	// SHA256Key records the original, uncompressed object's digest in its PAX header.
 	SHA256Key = "S3Glacier.sha256"
+	// ETagKey records the server-computed MD5 of the original S3 object bytes.
+	ETagKey = "S3Glacier.etag"
 )
 
 type checkpoint struct {

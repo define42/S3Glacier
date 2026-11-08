@@ -260,10 +260,21 @@ func serveArchiveView(w http.ResponseWriter, r *http.Request, b bucket.Bucket, r
 		if archive.IsInternalEntry(header) {
 			continue
 		}
+		objectMetadata, err := shared.ObjectMetadataFromTar(header)
+		if err != nil {
+			http.Error(w, "Unable to read object metadata", http.StatusInternalServerError)
+			return
+		}
 		metadata, _ := json.Marshal(header.PAXRecords)
 		row := archiveRow{ID: header.Name, URL: shared.ObjectURL(b.Name, header.Name, token),
 			StoredSize: header.Size, OriginalSize: header.Size, Filename: header.Uname,
 			MimeType: header.Gname, Compressed: header.Mode == 1, Metadata: string(metadata)}
+		if filename := objectMetadata.User["filename"]; filename != "" {
+			row.Filename = filename
+		}
+		if contentType := objectMetadata.Headers["content-type"]; contentType != "" {
+			row.MimeType = contentType
+		}
 		if row.Compressed {
 			row.OriginalSize = int64(header.Uid)
 		}

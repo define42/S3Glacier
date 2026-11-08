@@ -4,19 +4,76 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestListPreservesFirstETagAcrossCacheRefresh(t *testing.T) {
+	t.Parallel()
+	for _, budget := range []int64{defaultMetadataCacheBytes, 1} {
+		t.Run(fmt.Sprintf("budget=%d", budget), func(t *testing.T) {
+			t.Parallel()
+			store, path := NewStore(), storeTestPath(t)
+			store.lists.limit = budget
+			appendObject := func(name, value string) string {
+				t.Helper()
+				payload := []byte(value)
+				digest := md5.Sum(payload)
+				etag := hex.EncodeToString(digest[:])
+				header := storeTestHeader(name, payload)
+				header.PAXRecords = map[string]string{ETagKey: etag, "S3Glacier.meta.note": strings.Repeat("metadata", 128)}
+				if _, err := store.Append(t.Context(), path, header, payload, sha256.Sum256(payload)); err != nil {
+					t.Fatal(err)
+				}
+				return etag
+			}
+			first := appendObject("group/a", "first")
+			want := []ListEntry{{Key: "group/a", Size: 5, ETag: first}}
+			for range 2 {
+				listTestWant(t, store, path, ListOptions{Limit: 10}, want)
+			}
+			appendObject("group/a", "later duplicate")
+			second := appendObject("group/b", "second")
+			want = append(want, ListEntry{Key: "group/b", Size: 6, ETag: second})
+			listTestWant(t, store, path, ListOptions{Limit: 10}, want)
+			listTestWant(t, store, path, ListOptions{Delimiter: "/", Limit: 10}, []ListEntry{{Key: "group/", CommonPrefix: true}})
+			listTestWant(t, NewStore(), path, ListOptions{Limit: 10}, want)
+		})
+	}
+}
+
+func TestListRejectsMalformedStoredETag(t *testing.T) {
+	t.Parallel()
+	for _, etag := range []string{"", "not-an-md5", strings.Repeat("A", 32)} {
+		t.Run(fmt.Sprintf("etag=%q", etag), func(t *testing.T) {
+			t.Parallel()
+			store, path := NewStore(), storeTestPath(t)
+			payload := []byte("body")
+			header := storeTestHeader("object", payload)
+			header.PAXRecords = map[string]string{ETagKey: etag}
+			if _, err := store.Append(t.Context(), path, header, payload, sha256.Sum256(payload)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.List(t.Context(), path, ListOptions{Limit: 10}); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("List accepted invalid ETag %q: %v", etag, err)
+			}
+		})
+	}
+
+}
 
 func TestListMetadataCacheRefreshAndLogicalKeys(t *testing.T) {
 	t.Parallel()

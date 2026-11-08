@@ -142,6 +142,34 @@ func TestFileViewRawDownloadRequiresReadToken(t *testing.T) {
 	}
 }
 
+func TestFileViewDisplaysS3FilenameMetadata(t *testing.T) {
+	store, data := testStore(t)
+	relative := "2026/11/07/10/0000.tar"
+	payload := []byte("report")
+	header := &tar.Header{
+		Name: "20261107-1036-40f1-b34f-02d7517a01d3", Size: int64(len(payload)),
+		Uname: "submitted-key.txt", Gname: "application/octet-stream",
+		PAXRecords: map[string]string{
+			shared.PAXUserMetadataPrefix + "filename":     "report<script>.csv",
+			shared.PAXHTTPMetadataPrefix + "content-type": "text/csv",
+		},
+	}
+	if _, err := archive.Default.Append(t.Context(), filepath.Join(data.Path, relative), header, payload, sha256.Sum256(payload)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/files/"+relative, nil)
+	request = mux.SetURLVars(request, map[string]string{"path": relative})
+	response := httptest.NewRecorder()
+	FileView(store).ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "<td>report&lt;script&gt;.csv</td>") || !strings.Contains(body, "<td>text/csv</td>") {
+		t.Fatalf("metadata filename/type not rendered: %d %s", response.Code, body)
+	}
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<td>submitted-key.txt</td>") {
+		t.Fatalf("metadata filename not preferred or escaped: %s", body)
+	}
+}
+
 func TestUUIDUsesSelectedBucket(t *testing.T) {
 	store, _ := testStore(t)
 	logs, err := store.Create("logs", 4)

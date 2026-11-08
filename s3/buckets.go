@@ -183,6 +183,10 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 			writeS3Error(w, r, http.StatusNotFound, "NoSuchBucket", "The bucket does not exist.")
 			return
 		}
+		if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+			writeS3Error(w, r, http.StatusBadRequest, "InvalidArgument", "The query string is malformed.")
+			return
+		}
 		for name := range s3OperationQuery(r) {
 			if name != "parse" {
 				writeS3Error(w, r, http.StatusNotImplemented, "NotImplemented", "Object subresources are not supported.")
@@ -218,8 +222,16 @@ func ObjectHandler(store *bucket.Store) S3SecurityHandle {
 				return
 			}
 		}
-		if _, _, err := shared.UploadToBucket(r, b, vars["id"], fileBytes); err != nil {
+		metadata, err := objectMetadata(r)
+		if err != nil {
+			writeMetadataError(w, r, err)
+			return
+		}
+		metadata.ETag = hex.EncodeToString(hash[:])
+		if _, _, err := shared.UploadToBucketWithMetadata(r, b, vars["id"], fileBytes, metadata); err != nil {
 			switch {
+			case errors.Is(err, shared.ErrMetadataTooLarge):
+				writeMetadataError(w, r, err)
 			case errors.Is(err, archive.ErrInvalidEntry):
 				writeS3Error(w, r, http.StatusBadRequest, "InvalidArgument", "The object metadata cannot be stored in an archive.")
 			case errors.Is(err, archive.ErrBusy):
@@ -254,6 +266,10 @@ func s3OperationQuery(r *http.Request) url.Values {
 	}
 	if _, verifiedV4 := V4Info(r); verifiedV4 {
 		for name := range query {
+			if strings.HasPrefix(strings.ToLower(name), "x-amz-meta-") {
+				query.Del(name)
+				continue
+			}
 			switch strings.ToLower(name) {
 			case "x-amz-checksum-crc32", "x-amz-checksum-crc32c", "x-amz-checksum-crc64nvme",
 				"x-amz-checksum-sha1", "x-amz-checksum-sha256", "x-amz-sdk-checksum-algorithm",
@@ -284,7 +300,7 @@ func (w *objectResponseWriter) WriteHeader(status int) {
 		return
 	}
 	w.hasError = true
-	w.Header().Del("Content-Length")
+	shared.ClearObjectMetadataHeaders(w.Header())
 	w.Header().Del("Last-Modified")
 	code, message := "InternalError", "Unable to read the object."
 	switch status {
