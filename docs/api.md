@@ -19,9 +19,9 @@ The unsigned home page, static assets, and `/metrics` are accessible without the
 
 The server creates `data` with 256 TAR files per hour. A new bucket requires a name and an explicit `tar_files_per_hour` integer from 1 through 65,536; non-power-of-two counts such as 7 are supported. The count is fixed for that bucket's lifetime. Recreating an existing bucket returns `409`, even if the requested count is unchanged. Buckets cannot be renamed, reconfigured, or deleted through either API.
 
-Names contain 3–63 lowercase letters, digits, or hyphens, with a letter or digit at each end. Reserved names are `api`, `buckets`, `files`, `get`, `metrics`, `rawupload`, `redirect`, `static`, `upload`, `uuid`, and `uuidv1`.
+Names contain 3–63 lowercase letters, digits, or hyphens, with a letter or digit at each end. Reserved names are `api`, `buckets`, `files`, `get`, `metrics`, `rawupload`, `redirect`, `static`, `upload`, and `uuid`.
 
-Object IDs must contain a lowercase UUID version 1 or a timestamped version 4 UUID such as `20261107-1200-4000-8000-000000000001`. Use `/uuid` or `/uuidv1` to generate one. The UUID is extracted from a filename or ID containing it; downloads address that extracted UUID. S3 object keys are a single path segment, rather than arbitrary S3 key hierarchies.
+Object IDs must contain a lowercase timestamped version 4 UUID such as `20261107-1200-4000-8000-000000000001`. Use `/uuid` to generate one. The UUID is extracted from a filename or ID containing it; downloads address that extracted UUID. S3 object keys are a single path segment, rather than arbitrary S3 key hierarchies.
 
 Use a fresh UUID for each different object. Every accepted upload appends an entry, including repeated UUIDs with identical or different bytes. Existing entries are never overwritten: HTTP and S3 GET/HEAD return the first committed match for the extracted UUID in that bucket. Later duplicates consume storage and appear in TAR browsing and raw TAR downloads. Object uploads do not reject duplicates with `409` and are not idempotent. Single-object deletion is unavailable; automatic cleanup removes whole archive files. See [storage and retention](../README.md#storage-and-retention) for the on-disk layout and retention behavior.
 
@@ -115,7 +115,6 @@ Downloads decompress stored objects automatically. `Content-Length` describes th
 | Method and path | Permission | Result |
 | --- | --- | --- |
 | `GET /uuid` | Read | A timestamped version 4 UUID and its resolved archive. |
-| `GET /uuidv1` | Read | A version 1 UUID and its resolved archive. |
 | `GET /redirect?file={id}` | Read | `303` redirect to a bucket-scoped object download. |
 | `GET` or `HEAD /buckets/{bucket}/files/{path}` | Read | HTML directory or TAR contents view; `?download=1` downloads a TAR file. |
 | `GET /buckets/{bucket}/files` | None on the redirect itself | `307` redirect to the trailing-slash browser path, where read authorization applies. |

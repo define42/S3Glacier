@@ -33,7 +33,7 @@ each TAR's .commit checkpoint. One serving process per data root is required;
 in-memory locks are keyed by full bucket/hour/shard and do not cross hours. One
 lifetime .server.lock enforces standalone-server ownership; use a local filesystem
 with file/directory sync, atomic rename, and power-safe overwrite semantics.
-An object name must contain a supported lowercase UUID v1 or timestamped UUID v4.
+An object name must contain a lowercase timestamped UUID v4.
 Uploads buffer a complete object in memory. Every accepted upload appends an entry,
 including repeated UUIDs with the same or different bytes. GET/HEAD return the
 first committed match; later duplicates consume storage and appear in TAR browsing

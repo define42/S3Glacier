@@ -33,16 +33,15 @@ const (
 func TestGetBucketContainerFileShardMapping(t *testing.T) {
 	configureStorage(t)
 	tests := []struct {
-		count   int
-		v1Shard string
-		v4Shard string
+		count int
+		shard string
 	}{
-		{count: 1, v1Shard: "0000.tar", v4Shard: "0000.tar"},
-		{count: 4, v1Shard: "0000.tar", v4Shard: "0003.tar"},
-		{count: 7, v1Shard: "0000.tar", v4Shard: "0005.tar"},
-		{count: 256, v1Shard: "00e4.tar", v4Shard: "005f.tar"},
-		{count: 257, v1Shard: "00fb.tar", v4Shard: "002c.tar"},
-		{count: 65536, v1Shard: "c3e4.tar", v4Shard: "fc5f.tar"},
+		{count: 1, shard: "0000.tar"},
+		{count: 4, shard: "0003.tar"},
+		{count: 7, shard: "0005.tar"},
+		{count: 256, shard: "005f.tar"},
+		{count: 257, shard: "002c.tar"},
+		{count: 65536, shard: "fc5f.tar"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("count %d", tt.count), func(t *testing.T) {
@@ -52,35 +51,22 @@ func TestGetBucketContainerFileShardMapping(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			objects := []struct {
-				name string
-				id   string
-				date string
-				file string
-			}{
-				{name: "uuidv1", id: v1ID, date: "1970/01/01/00", file: tt.v1Shard},
-				{name: "uuidv4", id: v4ID, date: "2026/11/07/10", file: tt.v4Shard},
+			got, id, err := shared.GetBucketContainerFile(b, v4ID)
+			want := filepath.Join(b.Path, "2026", "11", "07", "10", tt.shard)
+			if err != nil || got != want || id != v4ID {
+				t.Fatalf("path=%q id=%q err=%v, want path=%q id=%q", got, id, err, want, v4ID)
 			}
-			for _, object := range objects {
-				t.Run(object.name, func(t *testing.T) {
-					got, id, err := shared.GetBucketContainerFile(b, object.id)
-					want := filepath.Join(b.Path, filepath.FromSlash(object.date), object.file)
-					if err != nil || got != want || id != object.id {
-						t.Fatalf("path=%q id=%q err=%v, want path=%q id=%q", got, id, err, want, object.id)
-					}
-					index, err := strconv.ParseUint(strings.TrimSuffix(filepath.Base(got), ".tar"), 16, 64)
-					if err != nil || index >= uint64(tt.count) {
-						t.Fatalf("shard index %d outside count %d: %v", index, tt.count, err)
-					}
-					reloaded, err := openBuckets(t, root).Get(b.Name)
-					if err != nil {
-						t.Fatal(err)
-					}
-					afterRestart, _, err := shared.GetBucketContainerFile(reloaded, object.id)
-					if err != nil || afterRestart != got {
-						t.Fatalf("mapping changed after restart: before=%q after=%q err=%v", got, afterRestart, err)
-					}
-				})
+			index, err := strconv.ParseUint(strings.TrimSuffix(filepath.Base(got), ".tar"), 16, 64)
+			if err != nil || index >= uint64(tt.count) {
+				t.Fatalf("shard index %d outside count %d: %v", index, tt.count, err)
+			}
+			reloaded, err := openBuckets(t, root).Get(b.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterRestart, _, err := shared.GetBucketContainerFile(reloaded, v4ID)
+			if err != nil || afterRestart != got {
+				t.Fatalf("mapping changed after restart: before=%q after=%q err=%v", got, afterRestart, err)
 			}
 		})
 	}
@@ -97,39 +83,80 @@ func TestGetBucketContainerFileUsesSameLayoutForDefaultBucket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := []struct {
-		name string
-		id   string
-		path string
-	}{
-		{name: "uuidv1", id: v1ID, path: "1970/01/01/00/00e4.tar"},
-		{name: "uuidv4", id: v4ID, path: "2026/11/07/10/005f.tar"},
+	want := filepath.Join(data.Path, "2026", "11", "07", "10", "005f.tar")
+	got, id, err := shared.GetBucketContainerFile(data, v4ID)
+	if err != nil || got != want || id != v4ID {
+		t.Fatalf("default mapping = %q, %q, %v; want %q", got, id, err, want)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			want := filepath.Join(root, "buckets", "data", filepath.FromSlash(tt.path))
-			got, id, err := shared.GetBucketContainerFile(data, tt.id)
-			if err != nil || got != want || id != tt.id {
-				t.Fatalf("default mapping = %q, %q, %v; want %q", got, id, err, want)
-			}
-			otherPath, _, err := shared.GetBucketContainerFile(other, tt.id)
-			otherWant := filepath.Join(root, "buckets", "other-data", filepath.FromSlash(tt.path))
-			if err != nil || otherPath != otherWant {
-				t.Fatalf("named bucket mapping = %q, %v; want %q", otherPath, err, otherWant)
-			}
-			contents := []byte("default bucket object")
-			if uploaded := uploadObject(t, data, tt.id, contents); uploaded != want {
-				t.Fatalf("upload path = %q, want %q", uploaded, want)
-			}
-			reloaded, err := openBuckets(t, root).Get(bucket.DefaultName)
-			if err != nil {
-				t.Fatal(err)
-			}
-			out := getObject(reloaded, tt.id)
-			if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), contents) {
-				t.Fatalf("default bucket after restart: status=%d body=%q", out.Code, out.Body.Bytes())
+	otherPath, _, err := shared.GetBucketContainerFile(other, v4ID)
+	otherWant := filepath.Join(other.Path, "2026", "11", "07", "10", "005f.tar")
+	if err != nil || otherPath != otherWant {
+		t.Fatalf("named bucket mapping = %q, %v; want %q", otherPath, err, otherWant)
+	}
+	contents := []byte("default bucket object")
+	if uploaded := uploadObject(t, data, v4ID, contents); uploaded != want {
+		t.Fatalf("upload path = %q, want %q", uploaded, want)
+	}
+	reloaded, err := openBuckets(t, root).Get(bucket.DefaultName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := getObject(reloaded, v4ID)
+	if out.Code != http.StatusOK || !bytes.Equal(out.Body.Bytes(), contents) {
+		t.Fatalf("default bucket after restart: status=%d body=%q", out.Code, out.Body.Bytes())
+	}
+}
+
+func TestGetBucketContainerFileExtendedRetention(t *testing.T) {
+	root := configureStorage(t)
+	b := bucket.Bucket{Name: "testing", Path: root, TarFilesPerHour: 4}
+	for _, tc := range []struct {
+		name    string
+		enabled string
+		id      string
+		folder  string
+	}{
+		{name: "ordinary minutes", enabled: "true", id: v4ID, folder: "2026/11/07/10"},
+		{name: "extension disabled", enabled: "false", id: "20261107-1081-40f1-b34f-02d7517a01d3", folder: "2026/11/07/10"},
+		{name: "one month extension", enabled: "true", id: "20261107-1081-40f1-b34f-02d7517a01d3", folder: "2026/12/07/10"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.EXTEND_LIFE_SUPPORT, tc.enabled)
+			config.Settings.Set(config.EXTEND_LIFE_SUPPORT, "", "false")
+			path, id, err := shared.GetBucketContainerFile(b, "report-"+tc.id+".json")
+			if err != nil || id != tc.id || filepath.Dir(path) != filepath.Join(root, filepath.FromSlash(tc.folder)) {
+				t.Fatalf("extended mapping: path=%q id=%q err=%v", path, id, err)
 			}
 		})
+	}
+}
+
+func TestGetBucketContainerFileRejectsUUIDv1(t *testing.T) {
+	root := configureStorage(t)
+	b := bucket.Bucket{Name: "testing", Path: root, TarFilesPerHour: 4}
+	for _, enabled := range []string{"false", "true"} {
+		t.Run("extended retention "+enabled, func(t *testing.T) {
+			t.Setenv(config.EXTEND_LIFE_SUPPORT, enabled)
+			config.Settings.Set(config.EXTEND_LIFE_SUPPORT, "", "false")
+			for _, tc := range []struct {
+				name string
+				id   string
+			}{
+				{name: "bare UUID", id: v1ID},
+				{name: "embedded UUID", id: "report-" + v1ID + ".json"},
+				{name: "date-looking prefix", id: "20261107-1036-10f1-b34f-02d7517a01d3"},
+				{name: "first UUID remains authoritative", id: v1ID + "-" + v4ID},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if path, _, err := shared.GetBucketContainerFile(b, tc.id); err == nil || path != "" {
+						t.Fatalf("UUIDv1 accepted: path=%q err=%v", path, err)
+					}
+				})
+			}
+		})
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("rejected UUIDs changed storage: entries=%v err=%v", entries, err)
 	}
 }
 
@@ -170,7 +197,7 @@ func TestUploadToBucketIsolatesSameID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{v1ID, v4ID} {
+	for _, id := range []string{v4ID, "20261108-1400-4000-8000-000000000001"} {
 		t.Run(id, func(t *testing.T) {
 			firstData := bytes.Repeat([]byte("first bucket content\n"), 20)
 			secondData := bytes.Repeat([]byte("second bucket content\n"), 20)

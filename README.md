@@ -197,18 +197,15 @@ client configuration, and signing details. The
 
 ### Object identifiers
 
-An object name must contain a lowercase UUID in one of these formats:
-
-| Format | Archive hour |
-| --- | --- |
-| UUID v1 | Embedded UUID timestamp, converted to UTC |
-| Application timestamped UUID v4, such as `20261107-1200-4000-8000-000000000001` | Date and hour from the `YYYYMMDD-HHMM` prefix, interpreted as UTC |
+An object name must contain an application timestamped UUID v4 in lowercase,
+such as `20261107-1200-4000-8000-000000000001`. The date and hour in its
+`YYYYMMDD-HHMM` prefix select the archive hour and are interpreted as UTC.
 
 The timestamped v4 format requires a year from 2000 through 2099. An ordinary
 random UUID v4 does not encode the required date. The first matching
 UUID in a supplied name is the storage identifier; surrounding filename text does
-not make a distinct object. The web interface can generate supported identifiers.
-Its timestamped v4 generator uses the process's local time, so use a UTC process
+not make a distinct object. The web interface and `GET /uuid` generate supported
+identifiers. The generator uses the process's local time, so use a UTC process
 timezone when those generated prefixes must represent UTC hours.
 
 ### Storage and retention

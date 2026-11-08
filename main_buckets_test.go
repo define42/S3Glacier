@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"glacier/bucket"
@@ -13,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/minio/minio-go/v7/pkg/signer"
 )
 
 func TestBucketRoundTripAndRestart(t *testing.T) {
@@ -264,6 +268,91 @@ func TestS3BucketRoutes(t *testing.T) {
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "LocationConstraint") {
 		t.Fatalf("default S3 location: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestObjectRoutesRejectUUIDv1(t *testing.T) {
+	dataRoot := t.TempDir()
+	t.Setenv("DATA_FOLDER", dataRoot)
+	t.Setenv("READ_TOKEN", "read-secret")
+	t.Setenv("WRITE_TOKEN", "write-secret")
+	t.Setenv("S3_READ_ONLY_USERS", "")
+	t.Setenv("S3_READ_WRITE_USERS", "s3writer=secret")
+	t.Setenv("EXTEND_LIFE_SUPPORT", "false")
+	router, err := NewServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const oldID = "13814000-1dd2-11b2-8000-000000000001"
+	for _, protocol := range []string{"HTTP", "S3V2", "S3V4"} {
+		t.Run(protocol, func(t *testing.T) {
+			for _, key := range []struct {
+				name string
+				id   string
+			}{
+				{name: "UUIDv1", id: oldID},
+				{name: "embedded_filename", id: "capture-" + oldID + ".pcap"},
+				{name: "timestamp_prefix", id: "20261107-1200-1000-8000-000000000001"},
+			} {
+				t.Run(key.name, func(t *testing.T) {
+					for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodHead} {
+						t.Run(method, func(t *testing.T) {
+							var body []byte
+							if method == http.MethodPut {
+								body = []byte("UUIDv1 must not be archived")
+							}
+							target := "/data/" + key.id
+							if protocol == "HTTP" {
+								target = "/buckets/data/get/" + key.id
+								if method == http.MethodPut {
+									target = "/buckets/data/rawupload/" + key.id
+								}
+							}
+							request := httptest.NewRequest(method, "http://example.com"+target, bytes.NewReader(body))
+							switch protocol {
+							case "HTTP":
+								token := "read-secret"
+								if method == http.MethodPut {
+									token = "write-secret"
+								}
+								request.Header.Set("Authorization", "Bearer "+token)
+							case "S3V2":
+								request = s3.SignV2(*request, "s3writer", "secret", false)
+							case "S3V4":
+								digest := sha256.Sum256(body)
+								request.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(digest[:]))
+								request = signer.SignV4(*request, "s3writer", "secret", "", "us-east-1")
+							}
+							response := httptest.NewRecorder()
+							router.ServeHTTP(response, request)
+							if response.Code != http.StatusBadRequest {
+								t.Fatalf("UUIDv1 request returned %d: %s", response.Code, response.Body.String())
+							}
+							if protocol != "HTTP" && method != http.MethodHead && !strings.Contains(response.Body.String(), "<Code>InvalidArgument</Code>") {
+								t.Fatalf("S3 rejection is not an invalid object key: %s", response.Body.String())
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+
+	t.Run("multipart_filename", func(t *testing.T) {
+		request := retryMultipartRequest(t, oldID, []byte("UUIDv1 must not be archived"))
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("UUIDv1 multipart upload returned %d: %s", response.Code, response.Body.String())
+		}
+	})
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "buckets", "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected UUIDv1 requests created archive files or directories: %v", entries)
 	}
 }
 

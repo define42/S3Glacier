@@ -198,11 +198,11 @@ components:
       maxLength: 63
       pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
       not:
-        enum: [api, buckets, files, get, metrics, rawupload, redirect, static, upload, uuid, uuidv1]
+        enum: [api, buckets, files, get, metrics, rawupload, redirect, static, upload, uuid]
       description: |
         Lowercase letters, digits, and hyphens, with alphanumeric ends.
         Reserved names are api, buckets, files, get, metrics, rawupload,
-        redirect, static, upload, uuid, and uuidv1.
+        redirect, static, upload, and uuid.
       example: logs
     TarFilesPerHour:
       type: integer

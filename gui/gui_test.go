@@ -148,23 +148,21 @@ func TestUUIDUsesSelectedBucket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"v4", "v1"} {
-		t.Run(name, func(t *testing.T) {
-			handler := Uuidhello(store)
-			if name == "v1" {
-				handler = Uuidv1hello(store)
-			}
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/uuid?bucket=logs", nil))
-			var result MyUUID
-			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-				t.Fatal(err)
-			}
-			wantPath, _, err := shared.GetBucketContainerFile(logs, result.Uuid)
-			if err != nil || result.ContainerFile != wantPath || result.Bucket != "logs" || result.TarFilesPerHour != 4 {
-				t.Fatalf("UUID result = %+v, resolved path = %s, error = %v", result, wantPath, err)
-			}
-		})
+	response := httptest.NewRecorder()
+	Uuidhello(store).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/uuid?bucket=logs", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("UUID generation status = %d, body = %s", response.Code, response.Body)
+	}
+	var result MyUUID
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Uuid) != 36 || result.Uuid[14] != '4' {
+		t.Fatalf("generated UUID is not version 4: %q", result.Uuid)
+	}
+	wantPath, _, err := shared.GetBucketContainerFile(logs, result.Uuid)
+	if err != nil || result.ContainerFile != wantPath || result.Bucket != "logs" || result.TarFilesPerHour != 4 {
+		t.Fatalf("UUID result = %+v, resolved path = %s, error = %v", result, wantPath, err)
 	}
 }
 

@@ -40,14 +40,13 @@ func ExtractGUID() *regexp.Regexp {
 var extractGUID = ExtractGUID()
 
 // GetBucketContainerFile returns the archive path and first UUID substring in
-// uuidString without creating files. It accepts UUIDv1 timestamps in UTC or
-// timestamped UUIDv4 values whose first two groups encode YYYYMMDD-HHMM with a
-// year from 2000 through 2099. For v4, only the date and hour determine the folder;
-// ordinary minutes are ignored.
+// uuidString without creating files. It accepts only timestamped UUIDv4 values
+// whose first two groups encode YYYYMMDD-HHMM with a year from 2000 through 2099.
+// Only the date and hour determine the folder; ordinary minutes are ignored.
 //
 // When EXTEND_LIFE_SUPPORT is exactly "true", the last two characters of the
 // second group are interpreted as a hexadecimal byte. A set high bit adds the
-// remaining seven bits as calendar months using [time.Time.AddDate]. UUIDv1 is unaffected.
+// remaining seven bits as calendar months using [time.Time.AddDate].
 // Changing this setting can change where an existing flagged UUID is found.
 //
 // The path is b.Path/YYYY/MM/DD/HH/shard.tar, with a four-digit hexadecimal shard
@@ -63,22 +62,16 @@ func GetBucketContainerFile(b bucket.Bucket, uuidString string) (string, string,
 	if err != nil {
 		return "", timeUuid, err
 	}
-	var timestamp time.Time
-	if id.Version() == 1 {
-		sec, nsec := id.Time().UnixTime()
-		timestamp = time.Unix(sec, nsec).UTC()
-	} else {
-		if id.Version() != 4 || timeUuid[:2] != "20" {
-			return "", timeUuid, errors.New("UUID must be version 1 or a timestamped version 4")
-		}
-		timestamp, err = time.Parse("2006010215", timeUuid[:8]+timeUuid[9:11])
-		if err != nil {
-			return "", timeUuid, fmt.Errorf("invalid UUID timestamp: %w", err)
-		}
-		keep, _ := strconv.ParseUint(timeUuid[11:13], 16, 8)
-		if config.Settings.Get(config.EXTEND_LIFE_SUPPORT) == "true" && keep&0x80 != 0 {
-			timestamp = timestamp.AddDate(0, int(keep&0x7f), 0)
-		}
+	if id.Version() != 4 || timeUuid[:2] != "20" {
+		return "", timeUuid, errors.New("UUID must be a timestamped version 4")
+	}
+	timestamp, err := time.Parse("2006010215", timeUuid[:8]+timeUuid[9:11])
+	if err != nil {
+		return "", timeUuid, fmt.Errorf("invalid UUID timestamp: %w", err)
+	}
+	keep, _ := strconv.ParseUint(timeUuid[11:13], 16, 8)
+	if config.Settings.Get(config.EXTEND_LIFE_SUPPORT) == "true" && keep&0x80 != 0 {
+		timestamp = timestamp.AddDate(0, int(keep&0x7f), 0)
 	}
 	hash := sha256.Sum256(id[:])
 	index := binary.BigEndian.Uint64(hash[:8]) % uint64(b.TarFilesPerHour)
@@ -87,8 +80,8 @@ func GetBucketContainerFile(b bucket.Bucket, uuidString string) (string, string,
 }
 
 // GetFileTime supplies the S3 Last-Modified value: UTC midnight of a timestamped
-// UUIDv4's date, or the current time for UUIDv1 and invalid inputs. It ignores the
-// hour and EXTEND_LIFE_SUPPORT and must not be used to locate stored objects.
+// UUIDv4's date, or the current time for unsupported or invalid inputs. It ignores
+// the hour and EXTEND_LIFE_SUPPORT and must not be used to locate stored objects.
 func GetFileTime(uuidString string) time.Time {
 	timeUuid := extractGUID.FindString(uuidString)
 	id, err := uuid.Parse(timeUuid)

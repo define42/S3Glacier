@@ -20,11 +20,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
-// MyUUID is the UUID handlers' JSON response, including the selected bucket's
+// MyUUID is the UUID handler's JSON response, including the selected bucket's
 // fixed archive count and the resolved filesystem path in ContainerFile.
 type MyUUID struct {
 	Uuid            string
@@ -38,19 +37,6 @@ type MyUUID struct {
 func Uuidhello(store *bucket.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeUUID(store, w, r, shared.GenerateTimeUUID())
-	}
-}
-
-// Uuidv1hello returns a read-authorized handler that generates a UUIDv1 and its
-// predicted archive path in the requested bucket. Generation failures return 500.
-func Uuidv1hello(store *bucket.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id, err := uuid.NewUUID()
-		if err != nil {
-			http.Error(w, "Unable to generate UUID", http.StatusInternalServerError)
-			return
-		}
-		writeUUID(store, w, r, id.String())
 	}
 }
 

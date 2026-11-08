@@ -191,8 +191,8 @@ storage guarantee. No per-bucket capacity quota is enforced.
 
 ### Extended retention
 
-`EXTEND_LIFE_SUPPORT=true` changes the folder date for flagged UUIDv4 identifiers.
-It does not affect UUIDv1. The last two hexadecimal characters of the second UUID
+`EXTEND_LIFE_SUPPORT=true` changes the folder date for flagged timestamped UUIDv4
+identifiers. The last two hexadecimal characters of the second UUID
 group are interpreted as one byte: its high bit (`0x80`) enables an offset, and
 the remaining seven bits specify **0–127 calendar months** added to the date.
 The hour is preserved. Month-end dates follow Go's `time.AddDate` normalization,

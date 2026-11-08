@@ -64,7 +64,7 @@
       <details class="mt-4"><summary>Upload files with existing UUID filenames</summary>
         <form enctype="multipart/form-data" action="/upload" method="post" data-token="write" class="mt-3">
           <div class="form-group"><label for="named-upload-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="named-upload-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
-          <div class="form-group"><label for="named-upload-files">Files with time UUID filenames</label><input class="form-control-file" type="file" name="file" id="named-upload-files" multiple required aria-describedby="uuid-help duplicate-uuid-help"><small class="form-text text-muted" id="uuid-help">Use a UUID v1 or a timestamped UUID v4, such as 20261107-1036-40f1-b34f-02d7517a01d3.</small></div>
+          <div class="form-group"><label for="named-upload-files">Files with time UUID filenames</label><input class="form-control-file" type="file" name="file" id="named-upload-files" multiple required aria-describedby="uuid-help duplicate-uuid-help"><small class="form-text text-muted" id="uuid-help">Use a timestamped UUID v4, such as 20261107-1036-40f1-b34f-02d7517a01d3.</small></div>
           <input type="hidden" name="token"><input type="hidden" name="read_token">
           <button type="submit" class="btn btn-outline-primary">Upload with existing UUIDs</button>
         </form>
@@ -86,7 +86,7 @@
       <details class="mt-4"><summary>Generate an example time UUID</summary>
         <form action="/uuid" method="get" data-token="read" class="mt-3">
           <div class="form-group"><label for="uuid-bucket">Bucket</label><select class="form-control bucket-select" name="bucket" id="uuid-bucket"><option value="data">data (256 TAR files/hour)</option></select></div>
-          <input type="hidden" name="token"><button type="submit" class="btn btn-outline-secondary">Generate UUID v4</button><button type="submit" formaction="/uuidv1" class="btn btn-outline-secondary">Generate UUID v1</button>
+          <input type="hidden" name="token"><button type="submit" class="btn btn-outline-secondary">Generate UUID v4</button>
         </form>
       </details>
     </section>

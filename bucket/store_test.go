@@ -192,7 +192,7 @@ func TestCreateRejectsInvalidNamesAndCounts(t *testing.T) {
 	t.Parallel()
 	store := openStore(t, t.TempDir())
 	invalidNames := []string{"", "ab", "UPPERCASE", "a.b", "a_b", "-abc", "abc-", "../logs", "a/b", strings.Repeat("a", 64)}
-	invalidNames = append(invalidNames, "buckets", "files", "static", "get", "rawupload", "upload", "uuid", "uuidv1", "redirect", "metrics", "api")
+	invalidNames = append(invalidNames, "buckets", "files", "static", "get", "rawupload", "upload", "uuid", "redirect", "metrics", "api")
 	for i, name := range invalidNames {
 		t.Run(fmt.Sprintf("name %d", i), func(t *testing.T) {
 			if _, err := store.Create(name, 4); !errors.Is(err, bucket.ErrInvalidName) {
@@ -207,7 +207,7 @@ func TestCreateRejectsInvalidNamesAndCounts(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"abc", "123", "abc-123", strings.Repeat("a", 63)} {
+	for _, name := range []string{"abc", "123", "abc-123", "uuidv1", strings.Repeat("a", 63)} {
 		if _, err := store.Create(name, 4); err != nil {
 			t.Errorf("Create valid name %q: %v", name, err)
 		}

@@ -89,7 +89,6 @@ func NewServer() (*mux.Router, error) {
 
 	r.Handle("/files/{path:.*}", gui.FileView(store)).Methods(http.MethodGet, http.MethodHead)
 	r.HandleFunc("/uuid", gui.Uuidhello(store)).Methods(http.MethodGet)
-	r.HandleFunc("/uuidv1", gui.Uuidv1hello(store)).Methods(http.MethodGet)
 	r.HandleFunc("/upload", uploadFile(store)).Methods(http.MethodPost)
 	r.HandleFunc("/rawupload/{id}", rawUpload(store)).Methods(http.MethodPut, http.MethodPost)
 	r.HandleFunc("/rawupload/{token}/{id}", rawUpload(store)).Methods(http.MethodPut, http.MethodPost)

@@ -220,7 +220,7 @@ func validateName(name string) error {
 		return fmt.Errorf("%w: use 3-63 lowercase letters, digits or hyphens with alphanumeric ends", ErrInvalidName)
 	}
 	switch name {
-	case "buckets", "files", "static", "get", "rawupload", "upload", "uuid", "uuidv1", "redirect", "metrics", "api":
+	case "buckets", "files", "static", "get", "rawupload", "upload", "uuid", "redirect", "metrics", "api":
 		return fmt.Errorf("%w: %q is reserved", ErrInvalidName, name)
 	}
 	return nil
