@@ -141,6 +141,15 @@ deadline. A blocked write times out and releases the archive lock when the
 handler returns. HTML archive listings release the lock before rendering their
 already collected metadata.
 
+S3 `ListObjectsV2` captures a committed archive boundary under the lock, then
+releases the lock before scanning metadata. Its bounded in-memory cache stores
+keys and sizes rather than file handles. Cache misses and refreshes share CPU and
+disk bandwidth with uploads, but do not hold a shard lock for the full scan.
+Listing does not create an on-disk index or change the append durability protocol.
+The metadata-cache budget is 32 MiB across buckets, with a separate bounded build
+budget; this is not a total process-memory limit. An archive that exceeds the
+budget falls back to scanning for the requested page. No cache setting is required.
+
 Before creating a new archive, the server creates and syncs its directory chain,
 including the parents needed to persist newly created directories. Before an
 upload is acknowledged, the server writes the entry and TAR footer, syncs and

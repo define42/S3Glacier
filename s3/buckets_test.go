@@ -51,7 +51,7 @@ func TestBucketHandler(t *testing.T) {
 		{name: "head requires read permission", method: "HEAD", path: "/data", user: S3User{Write: true}, status: 403},
 		{name: "location lookup", method: "GET", path: "/data?location", user: S3User{Read: true}, status: 200, wantCount: "256"},
 		{name: "missing bucket location", method: "GET", path: "/missing?location", user: S3User{Read: true}, status: 404, code: "NoSuchBucket"},
-		{name: "object listing explicitly unsupported", method: "GET", path: "/data", user: S3User{Read: true}, status: 501, code: "NotImplemented"},
+		{name: "V1 object listing explicitly unsupported", method: "GET", path: "/data", user: S3User{Read: true}, status: 501, code: "NotImplemented"},
 		{name: "bucket delete explicitly unsupported", method: "DELETE", path: "/data", user: S3User{Write: true}, status: 405, code: "MethodNotAllowed"},
 	}
 	for _, tc := range cases {

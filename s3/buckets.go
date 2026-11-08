@@ -76,9 +76,10 @@ func bucketHeaders(w http.ResponseWriter, b bucket.Bucket) {
 	w.Header().Set(TarFilesPerHourHeader, strconv.Itoa(b.TarFilesPerHour))
 }
 
-// BucketHandler handles PUT creation, HEAD existence checks, and GET ?location.
+// BucketHandler handles PUT creation, HEAD existence checks, GET ?location,
+// and GET ?list-type=2 object listings.
 // Wrap it with S3Security and provide a bucket mux variable. Creation requires
-// TarFilesPerHourHeader; existing buckets return 409 and object listing returns 501.
+// TarFilesPerHourHeader; existing buckets return 409. V1 object listing is unsupported.
 func BucketHandler(store *bucket.Store) S3SecurityHandle {
 	return func(w http.ResponseWriter, r *http.Request, user S3User) {
 		name := mux.Vars(r)["bucket"]
@@ -135,11 +136,20 @@ func BucketHandler(store *bucket.Store) S3SecurityHandle {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			if query := s3OperationQuery(r); query.Has("location") && len(query) == 1 {
+			if _, err := url.ParseQuery(r.URL.RawQuery); err != nil {
+				writeS3Error(w, r, http.StatusBadRequest, "InvalidArgument", "The query string is malformed.")
+				return
+			}
+			query := s3OperationQuery(r)
+			if query.Has("list-type") {
+				listObjectsV2(w, r, b, user)
+				return
+			}
+			if query.Has("location") && len(query) == 1 {
 				writeS3XML(w, http.StatusOK, GetBucketLocation{Xmlns: s3Namespace})
 				return
 			}
-			writeS3Error(w, r, http.StatusNotImplemented, "NotImplemented", "Object listing and other bucket subresources are not supported.")
+			writeS3Error(w, r, http.StatusNotImplemented, "NotImplemented", "Use list-type=2 to list objects; other bucket subresources are not supported.")
 		default:
 			methodNotAllowed(w, r, "GET, HEAD, PUT")
 		}
@@ -309,6 +319,7 @@ type listedBucket struct {
 type listAllMyBucketsResult struct {
 	XMLName xml.Name       `xml:"ListAllMyBucketsResult"`
 	Xmlns   string         `xml:"xmlns,attr"`
+	Owner   listOwner      `xml:"Owner"`
 	Buckets []listedBucket `xml:"Buckets>Bucket"`
 }
 
@@ -324,7 +335,7 @@ func ListBuckets(store *bucket.Store) S3SecurityHandle {
 			writeS3Error(w, r, http.StatusForbidden, "AccessDenied", "Read access is required.")
 			return
 		}
-		result := listAllMyBucketsResult{Xmlns: s3Namespace, Buckets: make([]listedBucket, 0)}
+		result := listAllMyBucketsResult{Xmlns: s3Namespace, Owner: archiveOwner(), Buckets: make([]listedBucket, 0)}
 		for _, b := range store.List() {
 			result.Buckets = append(result.Buckets, listedBucket{Name: b.Name, CreationDate: b.CreatedAt.UTC().Format(time.RFC3339)})
 		}

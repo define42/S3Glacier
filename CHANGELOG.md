@@ -7,6 +7,8 @@ current development branch and do not imply a published version.
 
 ### Added
 
+- S3 `ListObjectsV2` with canonical UUID prefix filtering, delimiters, pagination,
+  and a bounded metadata cache that refreshes from committed archive suffixes.
 - Per-archive committed-boundary checkpoints and identity manifests, with lazy
   recovery of interrupted appends before reads or subsequent writes.
 - Multiple buckets, each with a TAR-files-per-hour count chosen at creation and

@@ -133,7 +133,7 @@ curl --fail-with-body http://localhost:8000/buckets/small-files \
 | Interface | Authentication | Main operations |
 | --- | --- | --- |
 | HTTP management and browser routes | `READ_TOKEN` or `WRITE_TOKEN` | Create/list/inspect buckets; browse archives; upload/download objects |
-| S3 routes | `S3_READ_ONLY_USERS` or `S3_READ_WRITE_USERS` | Create/list/head buckets; get bucket location; PUT/GET/HEAD objects |
+| S3 routes | `S3_READ_ONLY_USERS` or `S3_READ_WRITE_USERS` | Create/list/head buckets; get bucket location; list/PUT/GET/HEAD objects |
 
 HTTP tokens are single strings. Leaving one empty disables that HTTP permission
 check. S3 requests always require configured signing credentials, independently
@@ -157,6 +157,7 @@ The server implements this subset of the S3 API:
 | `CreateBucket` | `PUT /{bucket}` | Creates a bucket with the required signed `x-amz-meta-tar-files-per-hour` header. The count is immutable; an existing name returns `409`. |
 | `HeadBucket` | `HEAD /{bucket}` | Checks whether the bucket exists and returns its TAR count header. |
 | `GetBucketLocation` | `GET /{bucket}?location` | Returns an empty XML `LocationConstraint`; buckets have no assigned region. |
+| `ListObjectsV2` | `GET /{bucket}?list-type=2` | Lists unique canonical UUID keys in lexical order, with prefix filtering, delimiters, and continuation tokens. |
 | `PutObject` | `PUT /{bucket}/{key}` | Appends an object and returns its MD5 `ETag`. Repeated UUIDs append additional entries rather than overwriting earlier ones. |
 | `GetObject` | `GET /{bucket}/{key}` | Returns the original, decompressed bytes from the first committed matching UUID. |
 | `HeadObject` | `HEAD /{bucket}/{key}` | Returns headers for the first committed matching UUID, without an object body. |
@@ -179,9 +180,41 @@ curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
 
 Clients that cannot add this header can create buckets through the HTTP API.
 
+#### Listing objects
+
+List objects for an hour using their UUID prefix:
+
+```sh
+curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user 'local-access:local-secret' \
+  'http://localhost:8000/small-files?list-type=2&prefix=20261107-12&max-keys=1000'
+```
+
+Keys are the extracted UUIDs, even when uploads used surrounding filename text.
+Each UUID appears once, with the original uncompressed size of its first committed
+entry. Prefix matching is literal and case-sensitive: `20261107` selects a date,
+`20261107-12` an hour, and `20261107-1230` a minute prefix. An empty prefix lists
+the bucket. These are string filters, not time-range parameters.
+
+Pages contain at most 1,000 results. When `IsTruncated` is true, pass the returned
+`NextContinuationToken` as `continuation-token` with the same bucket, prefix,
+delimiter, and credentials. `start-after`, `delimiter`, `encoding-type=url`, and
+`fetch-owner` are also supported; see the [listing reference](docs/api.md#listing-objects).
+Listing omits ETags because stored entries do not retain their MD5 values.
+
+Listings scan committed metadata without holding an archive lock throughout the
+scan. A process-local metadata cache with a 32 MiB budget shared across buckets
+reuses sorted keys across requests
+and reads newly committed suffixes when archives grow. Cache misses still scan TAR
+headers; a narrow minute prefix can require scanning its entire hour. With
+extended retention disabled, chronological traversal skips unrelated hours and
+stops once a page is filled. Extended retention requires a broader scan.
+Pagination is not a bucket-wide snapshot: concurrent uploads and cleanup can
+change later pages, and new keys before the continuation position are not revisited.
+
 #### Unsupported S3 commands and features
 
-- `ListObjects` and `ListObjectsV2` (listing objects within a bucket).
+- The older `ListObjects` API (`GET /{bucket}` without `list-type=2`).
 - `DeleteBucket`, `DeleteObject`, and `DeleteObjects`.
 - `CopyObject` and S3 multipart upload operations, including multipart copy.
 - Object versioning and bucket/object subresources such as ACLs, policies,
@@ -305,7 +338,8 @@ optional UUID convention, not a retention guarantee.
   in TAR browsing and raw TAR downloads. Use a fresh UUID for each new object;
   retries after a timeout or lost response may append duplicates and are not
   idempotent.
-- Reads scan the selected TAR sequentially; there is no separate object index.
+- Object downloads scan the selected TAR sequentially. The listing metadata cache
+  does not index payload offsets or change download behavior.
 - `/metrics` exposes Prometheus counters and gauges without authentication. The
   web landing page and static assets are also public; UUID helpers require the
   read token when one is configured.

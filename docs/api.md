@@ -146,6 +146,7 @@ Use path-style URLs, static access keys from the S3 settings, and a signing regi
 | `PUT /{bucket}` or `PUT /{bucket}/` | Write | `200`, creates the bucket. Requires `X-Amz-Meta-Tar-Files-Per-Hour`. |
 | `HEAD /{bucket}` | Read | `200` for an existing bucket; response includes its TAR count header. |
 | `GET /{bucket}?location` | Read | `200`, empty XML `LocationConstraint` and TAR count header. |
+| `GET /{bucket}?list-type=2` | Read | `200` XML `ListBucketResult`, with prefix filtering and pagination. |
 | `PUT /{bucket}/{id}` | Write | `200`, appends an object entry and returns a quoted MD5 `ETag` for the uploaded bytes. |
 | `GET /{bucket}/{id}` | Read | `200`, decoded bytes from the first committed match. |
 | `HEAD /{bucket}/{id}` | Read | `200` and headers from the first committed match, with no body. |
@@ -174,7 +175,58 @@ curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
   --user "$S3_ACCESS_KEY:$S3_SECRET_KEY" "$BASE/"
 ```
 
-Bucket listing is supported; object listing is not. `GET /{bucket}` and ListObjects/ListObjectsV2 requests return `501`. S3 multipart operations (`uploads`, `uploadId`, `partNumber`), object versioning, ACLs, and other subresources are unsupported. Unsupported methods, including `DELETE`, return `405`; unsupported query subresources return `501`. The signed SDK `x-id` annotation is accepted but does not choose the operation.
+Bucket listing and `ListObjectsV2` are supported. The older `ListObjects` API (`GET /{bucket}` without `list-type=2`) returns `501`. S3 multipart operations (`uploads`, `uploadId`, `partNumber`), object versioning, ACLs, and other subresources are unsupported. Unsupported methods, including `DELETE`, return `405`; unsupported query subresources return `501`. The signed SDK `x-id` annotation is accepted but does not choose the operation.
+
+### Listing objects
+
+`GET /{bucket}?list-type=2` returns unique canonical UUID keys in ascending lexical
+order. The key is the UUID extracted at upload, not the original filename. Later
+duplicate entries are omitted, and `Size` is the original uncompressed length of
+the first committed entry, matching GET/HEAD. `LastModified` uses the UUID's date
+at UTC midnight, as HEAD does. `StorageClass` is `STANDARD`. ETag and checksum
+metadata are omitted: listing does not read object payloads to compute them.
+
+| Query parameter | Behavior |
+| --- | --- |
+| `prefix` | Literal, case-sensitive beginning of the canonical UUID; defaults to empty. Does not need to be a complete UUID. |
+| `max-keys` | Integer from 0 through 1,000; defaults to 1,000. Zero returns an empty, nontruncated page. |
+| `start-after` | Excludes keys and common prefixes less than or equal to this string on the initial page. |
+| `continuation-token` | The opaque `NextContinuationToken` from a preceding page; takes precedence over `start-after`. |
+| `delimiter` | Groups matches at the first occurrence after `prefix`, returning `CommonPrefixes`. Each group counts as one result. `/` is accepted but UUID keys contain no slashes. |
+| `encoding-type` | Only `url` is supported; percent-encodes key-related XML fields. |
+| `fetch-owner` | `true` includes the server's common owner identity; defaults to `false`. There are no per-user bucket owners. |
+
+`KeyCount` includes objects and common-prefix groups. When `IsTruncated` is true,
+use `NextContinuationToken` in the next request with the same bucket, prefix,
+delimiter, and credentials. Tokens are authenticated and remain valid after a
+restart with unchanged credentials and bucket identity. They do not reserve
+archives or guarantee a consistent snapshot across pages. Uploads and cleanup can
+change later pages; newly uploaded keys before the continuation position are not
+revisited. A different page size may be used on subsequent requests.
+
+For the example credentials above:
+
+```sh
+curl --fail-with-body --aws-sigv4 'aws:amz:us-east-1:s3' \
+  --user "$S3_ACCESS_KEY:$S3_SECRET_KEY" \
+  "$BASE/s3-logs?list-type=2&prefix=20261107-12&max-keys=100"
+```
+
+Use `prefix=20261107` for a date or `prefix=20261107-1230` for a minute prefix.
+With extended retention disabled, listing prunes date/hour directories and stops
+after the earliest complete hour that fills a page. All populated shards in a
+visited hour must be considered. Extended retention changes physical placement,
+so listing scans more broadly while retaining UUID ordering and prefix semantics.
+
+A 32 MiB metadata-cache budget is shared across buckets. The cache stores
+metadata, never open archive files, and refreshes
+from newly committed TAR entries. The cache is disposable and rebuilds after a
+restart or eviction. Cache misses scan headers, so repeated pagination through a
+dense hour is more expensive when its metadata does not fit in the cache. Reads
+validate checkpoints and exclude uncommitted tails; the archive lock is released
+before scanning and before writing the XML response. A corrupt or quarantined
+candidate archive produces an error rather than an apparently complete partial
+listing. Concurrent cleanup can remove archives while a request runs.
 
 ### Signature modes and integrity
 

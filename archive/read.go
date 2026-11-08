@@ -12,6 +12,7 @@ import (
 // it is exposed, so reads and raw TAR exports see only a committed archive.
 type Reader struct {
 	file     *os.File
+	commit   checkpoint
 	release  func()
 	once     sync.Once
 	closeErr error
@@ -59,9 +60,9 @@ func (s *Store) open(ctx context.Context, path string, try bool) (*Reader, error
 		if err != nil {
 			return nil, err
 		}
-		f, err := s.openChecked(path)
+		f, c, err := s.openChecked(path)
 		if err == nil {
-			return &Reader{file: f, release: release}, nil
+			return &Reader{file: f, commit: c, release: release}, nil
 		}
 		release()
 		if !errors.Is(err, errRecovery) {
@@ -79,34 +80,35 @@ func (s *Store) open(ctx context.Context, path string, try bool) (*Reader, error
 	}
 }
 
-func (s *Store) openChecked(path string) (*os.File, error) {
+func (s *Store) openChecked(path string) (*os.File, checkpoint, error) {
+	var c checkpoint
 	if err := checkParents(path); err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	if err := s.healthy(path); err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	if _, err := regularFile(path); err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	c, err := readCheckpoint(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("%w: existing archive has no checkpoint", ErrCorrupt)
+		return nil, c, fmt.Errorf("%w: existing archive has no checkpoint", ErrCorrupt)
 	}
 	if err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, c, err
 	}
 	if err := inspect(f, c); err != nil {
-		return nil, errors.Join(err, f.Close())
+		return nil, c, errors.Join(err, f.Close())
 	}
 	if err := s.confirmCheckpoint(path); err != nil {
-		return nil, s.quarantine(path, errors.Join(err, f.Close()))
+		return nil, c, s.quarantine(path, errors.Join(err, f.Close()))
 	}
-	return f, nil
+	return f, c, nil
 }
 
 // recover is called only under the exclusive lock. It never adopts uncommitted

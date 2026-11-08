@@ -37,6 +37,7 @@ var (
 // Opening an archive validates its checkpoint and footer again.
 type Store struct {
 	locks  lockRegistry
+	lists  metadataCache
 	mu     sync.Mutex
 	failed map[string]error
 	hook   func(string) error // Tests inject failures or terminate a subprocess at persistence boundaries.
@@ -77,6 +78,7 @@ func (s *Store) clearFailure(path string) {
 	s.mu.Lock()
 	delete(s.failed, path)
 	s.mu.Unlock()
+	s.lists.remove(path)
 }
 
 func (s *Store) healthy(path string) error {
@@ -98,6 +100,7 @@ func (s *Store) quarantine(path string, err error) error {
 	}
 	s.failed[path] = err
 	s.mu.Unlock()
+	s.lists.remove(path)
 	return fmt.Errorf("%w: %w", ErrUnavailable, err)
 }
 
